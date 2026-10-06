@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Bot Telegram ALL-IN-ONE: TikTok no-logo + MP3 | Bán Data/VPN/Proxy | AI | SePay | Admin Panel."""
-import os, io, re, time, html, hmac, sqlite3, logging, threading, urllib.parse
+"""
+BOT TELEGRAM ĐA NĂNG - BẢN HOÀN CHỈNH
+TikTok no-logo (Snaptik) + MP3 | Bán Data/VPN/Proxy | AI Gemini | SePay | Admin Panel | Bot con
+"""
+import os, io, re, time, html, hmac, sqlite3, logging, threading, urllib.parse, json
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -15,25 +18,24 @@ try:
 except Exception:
     genai = None
 
-# ====================== CONFIG ======================
+# ══════════════════════════ CẤU HÌNH ══════════════════════════
 def env(k, d=""): return os.environ.get(k, d).strip()
 
-BOT_TOKEN     = env("BOT_TOKEN") or exit("Thiếu BOT_TOKEN")
-GEMINI_API_KEY= env("GEMINI_API_KEY")
-GEMINI_MODEL  = env("GEMINI_MODEL", "gemini-2.5-flash")
-SEPAY_API_KEY = env("SEPAY_API_KEY")
-ADMIN_ID      = int(env("ADMIN_ID", "8909964397"))
-BOT_USERNAME  = env("BOT_USERNAME", "@dangphuongvu_bot")
-ADMIN_USERNAME= env("ADMIN_USERNAME", "@dpvuuu")
-BANK_NAME     = env("BANK_NAME", "TPBank")
-ACCOUNT_NO    = env("ACCOUNT_NO", "10005824236")
-ACCOUNT_NAME  = env("ACCOUNT_NAME", "DANG PHUONG VU")
-CREATE_BOT_FEE= int(env("CREATE_BOT_FEE", "20000"))
-AI_COOLDOWN   = int(env("AI_COOLDOWN", "4"))
-
-DB_PATH = env("DB_PATH") or ("/var/data/bot_database.db" if os.path.isdir("/var/data") else "bot_database.db")
-PORT    = int(env("PORT", "8080"))
-PROXY_URL = env("PROXY_URL")
+BOT_TOKEN      = env("BOT_TOKEN") or exit("❌ Thiếu BOT_TOKEN")
+GEMINI_API_KEY = env("GEMINI_API_KEY")
+GEMINI_MODEL   = env("GEMINI_MODEL", "gemini-2.5-flash")
+SEPAY_API_KEY  = env("SEPAY_API_KEY")
+ADMIN_ID       = int(env("ADMIN_ID", "8909964397"))
+BOT_USERNAME   = env("BOT_USERNAME", "@dangphuongvu_bot")
+ADMIN_USERNAME = env("ADMIN_USERNAME", "@dpvuuu")
+BANK_NAME      = env("BANK_NAME", "TPBank")
+ACCOUNT_NO     = env("ACCOUNT_NO", "10005824236")
+ACCOUNT_NAME   = env("ACCOUNT_NAME", "DANG PHUONG VU")
+CREATE_BOT_FEE = int(env("CREATE_BOT_FEE", "20000"))
+AI_COOLDOWN    = int(env("AI_COOLDOWN", "4"))
+DB_PATH        = env("DB_PATH") or ("/var/data/bot_database.db" if os.path.isdir("/var/data") else "bot_database.db")
+PORT           = int(env("PORT", "8080"))
+PROXY_URL      = env("PROXY_URL")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
@@ -47,13 +49,12 @@ if genai and GEMINI_API_KEY:
     except Exception as e: log.warning("Gemini init: %s", e)
 
 user_states, active_child_bots = {}, {}
-child_lock, inflight_lock = threading.Lock(), threading.Lock()
+child_lock, inflight_lock, proxy_lock = threading.Lock(), threading.Lock(), threading.Lock()
 ai_last_call = {}
 webhook_log  = deque(maxlen=30)
 inflight     = set()
-proxy_lock   = threading.Lock()
 
-# ================================ DB ================================
+# ══════════════════════════ DATABASE ══════════════════════════
 @contextmanager
 def db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -69,6 +70,7 @@ def init_db():
     with db() as c:
         try: c.execute("PRAGMA journal_mode=WAL")
         except Exception: pass
+
         c.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
             balance INTEGER DEFAULT 0, total_recharged INTEGER DEFAULT 0,
@@ -76,6 +78,7 @@ def init_db():
         cols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
         if "month_key" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN month_key TEXT DEFAULT ''")
+
         c.execute("""CREATE TABLE IF NOT EXISTS user_bots (
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
             bot_token TEXT UNIQUE, bot_username TEXT,
@@ -101,7 +104,6 @@ def init_db():
             user_id INTEGER, product_id INTEGER, product_name TEXT,
             price INTEGER, status TEXT DEFAULT 'paid',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-        # ===== PROXY =====
         c.execute("""CREATE TABLE IF NOT EXISTS proxy_stock (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT NOT NULL, port INTEGER NOT NULL,
@@ -118,27 +120,42 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_proxy_status ON proxy_stock(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_proxy_soldto ON proxy_stock(sold_to)")
 
+        c.execute("""CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY, value TEXT DEFAULT '')""")
+        defaults = {
+            "home_title":    "🚀 HỆ THỐNG BOT ĐA NĂNG",
+            "home_subtitle": "TikTok • Data 4G • Proxy • AI",
+            "welcome_msg":   "Chào mừng bạn! Nhắn tin bất kỳ để chat với AI, gửi link TikTok để tải video.",
+            "shop_title":    "🛒 CỬA HÀNG DATA / VPN / PROXY",
+            "support_text":  "Nhắn admin để được hỗ trợ nhanh nhất!",
+            "footer_note":   "Cảm ơn bạn đã sử dụng dịch vụ! ❤️",
+        }
+        for k, v in defaults.items():
+            c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)", (k, v))
+
         c.execute("INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?,?,?)",
                   (ADMIN_ID, "", "Admin"))
+
         cnt = c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if cnt == 0:
             seed = [
-                ("🌐 Data Viettel 30K – Không giới hạn", "Gói data Viettel không giới hạn data, tốc độ cao, dùng 30 ngày.", 30000, "Data 4G", "text", "Viettel 30K\nSoạn: DATA30 gửi 191\nHoặc liên hệ admin để kích hoạt.", -1),
-                ("🌐 Data Viettel 50K – Không giới hạn", "Gói data Viettel không giới hạn data, tốc độ cao, dùng 30 ngày.", 50000, "Data 4G", "text", "Viettel 50K\nSoạn: DATA50 gửi 191\nHoặc liên hệ admin để kích hoạt.", -1),
-                ("📱 Data VinaPhone 30K – Không giới hạn", "Gói data VinaPhone không giới hạn, dùng 30 ngày.", 30000, "Data 4G", "text", "VinaPhone 30K\nSoạn: DK D30 gửi 888\nHoặc liên hệ admin.", -1),
-                ("📱 Data VinaPhone 50K – Không giới hạn", "Gói data VinaPhone không giới hạn, dùng 30 ngày.", 50000, "Data 4G", "text", "VinaPhone 50K\nSoạn: DK D50 gửi 888\nHoặc liên hệ admin.", -1),
-                ("📶 Data MobiFone 30K – Không giới hạn", "Gói data MobiFone không giới hạn, dùng 30 ngày.", 30000, "Data 4G", "text", "MobiFone 30K\nSoạn: DK D30 gửi 999\nHoặc liên hệ admin.", -1),
-                ("📶 Data MobiFone 50K – Không giới hạn", "Gói data MobiFone không giới hạn, dùng 30 ngày.", 50000, "Data 4G", "text", "MobiFone 50K\nSoạn: DK D50 gửi 999\nHoặc liên hệ admin.", -1),
-                ("🌐 Proxy 30 ngày", "Proxy dân cư Việt Nam, không giới hạn băng thông, hỗ trợ HTTP/SOCKS5.", 50000, "Proxy", "proxy", "30", -1),
-                ("🌐 Proxy 7 ngày", "Proxy dân cư Việt Nam, không giới hạn băng thông, dùng 7 ngày.", 20000, "Proxy", "proxy", "7", -1),
+                ("🌐 Data Viettel 30K – Không giới hạn", "Gói data Viettel KHÔNG GIỚI HẠN data, tốc độ cao, dùng 30 ngày. Hỗ trợ 4G/5G.", 30000, "Data 4G", "text", "Viettel 30K – Không giới hạn", -1),
+                ("🌐 Data Viettel 50K – Không giới hạn", "Gói data Viettel KHÔNG GIỚI HẠN data, tốc độ cao, dùng 30 ngày. Hỗ trợ 4G/5G.", 50000, "Data 4G", "text", "Viettel 50K – Không giới hạn", -1),
+                ("📱 Data VinaPhone 30K – Không giới hạn", "Gói data VinaPhone KHÔNG GIỚI HẠN data, dùng 30 ngày. Hỗ trợ 4G/5G.", 30000, "Data 4G", "text", "VinaPhone 30K – Không giới hạn", -1),
+                ("📱 Data VinaPhone 50K – Không giới hạn", "Gói data VinaPhone KHÔNG GIỚI HẠN data, dùng 30 ngày. Hỗ trợ 4G/5G.", 50000, "Data 4G", "text", "VinaPhone 50K – Không giới hạn", -1),
+                ("📶 Data MobiFone 30K – Không giới hạn", "Gói data MobiFone KHÔNG GIỚI HẠN data, dùng 30 ngày. Hỗ trợ 4G/5G.", 30000, "Data 4G", "text", "MobiFone 30K – Không giới hạn", -1),
+                ("📶 Data MobiFone 50K – Không giới hạn", "Gói data MobiFone KHÔNG GIỚI HẠN data, dùng 30 ngày. Hỗ trợ 4G/5G.", 50000, "Data 4G", "text", "MobiFone 50K – Không giới hạn", -1),
+                ("🌐 Proxy dân cư Việt Nam 30 ngày", "Proxy dân cư Việt Nam, KHÔNG GIỚI HẠN băng thông, hỗ trợ HTTP/SOCKS5. IP sạch, tốc độ cao, phù hợp nuôi tài khoản, chạy tool.", 50000, "Proxy", "proxy", "30", -1),
+                ("🌐 Proxy dân cư Việt Nam 7 ngày", "Proxy dân cư Việt Nam, KHÔNG GIỚI HẠN băng thông, hỗ trợ HTTP/SOCKS5. Dùng 7 ngày.", 20000, "Proxy", "proxy", "7", -1),
+                ("🔒 VPN cao cấp 1 tháng", "VPN tốc độ cao, không giới hạn dung lượng, hỗ trợ đa nền tảng. Dùng 30 ngày.", 80000, "VPN", "text", "VPN 1 tháng", -1),
             ]
             for row in seed:
                 c.execute("""INSERT INTO products
                     (name,description,price,category,delivery_type,delivery_data,stock)
                     VALUES (?,?,?,?,?,?,?)""", row)
-            log.info("Đã seed 8 sản phẩm mặc định (data + proxy)")
+            log.info("✅ Đã seed 9 sản phẩm mặc định (data + proxy + VPN)")
 
-# ---- USER ----
+# ─────────────── USER ───────────────
 def get_or_create_user(uid, username, full_name):
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?,?,?)",
@@ -191,7 +208,22 @@ def deactivate_bot(token):
     with db() as c:
         c.execute("UPDATE user_bots SET status='inactive' WHERE bot_token=?", (token,))
 
-# ================================ SHOP DB ================================
+# ─────────────── SETTINGS ───────────────
+def setting_get(key, default=""):
+    with db() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row and row[0] else default
+
+def setting_set(key, value):
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, value))
+
+def setting_all():
+    with db() as c:
+        rows = c.execute("SELECT key,value FROM settings").fetchall()
+    return {r[0]: r[1] for r in rows}
+
+# ─────────────── SHOP ───────────────
 def shop_get(pid):
     with db() as c:
         r = c.execute("""SELECT id,name,description,price,category,image_url,
@@ -203,21 +235,21 @@ def shop_get(pid):
 
 def shop_list(category=None, only_active=True, limit=50):
     with db() as c:
-        q = "SELECT id,name,price,category,image_url,stock,sold FROM products WHERE 1=1"
+        q = "SELECT id,name,price,category,image_url,stock,sold,active FROM products WHERE 1=1"
         p = []
         if only_active: q += " AND active=1"
         if category and category != "Tất cả":
             q += " AND category=?"; p.append(category)
         q += " ORDER BY id ASC LIMIT ?"; p.append(limit)
         rows = c.execute(q, p).fetchall()
-    return [dict(zip(["id","name","price","category","image_url","stock","sold"], r)) for r in rows]
+    return [dict(zip(["id","name","price","category","image_url","stock","sold","active"], r)) for r in rows]
 
 def shop_top(limit=8):
     with db() as c:
-        rows = c.execute("""SELECT id,name,price,category,image_url,stock,sold
+        rows = c.execute("""SELECT id,name,price,category,image_url,stock,sold,active
                             FROM products WHERE active=1 ORDER BY sold DESC LIMIT ?""",
                          (limit,)).fetchall()
-    return [dict(zip(["id","name","price","category","image_url","stock","sold"], r)) for r in rows]
+    return [dict(zip(["id","name","price","category","image_url","stock","sold","active"], r)) for r in rows]
 
 def shop_categories():
     with db() as c:
@@ -259,7 +291,27 @@ def shop_stats():
     return {"total_count": total[0], "total_revenue": total[1],
             "today_count": today[0], "today_revenue": today[1], "top": top}
 
-# ================================ PROXY MODULE ================================
+def product_delete(pid):
+    with db() as c:
+        c.execute("DELETE FROM products WHERE id=?", (pid,))
+
+def product_toggle(pid):
+    with db() as c:
+        row = c.execute("SELECT active FROM products WHERE id=?", (pid,)).fetchone()
+        if not row: return None
+        new = 0 if row[0] else 1
+        c.execute("UPDATE products SET active=? WHERE id=?", (new, pid))
+        return new
+
+def product_update_field(pid, field, value):
+    allowed = {"name", "description", "price", "category", "stock",
+               "delivery_data", "delivery_type"}
+    if field not in allowed: return False
+    with db() as c:
+        c.execute(f"UPDATE products SET {field}=? WHERE id=?", (value, pid))
+    return True
+
+# ─────────────── PROXY ───────────────
 def proxy_import(lines):
     added, errs = 0, []
     with db() as c:
@@ -343,59 +395,105 @@ def proxy_my_list(uid):
                        "expires_at": r[8], "status": status})
     return result
 
-# ================================ TIKTOK ================================
-TIKWM = "https://www.tikwm.com"
+# ══════════════════════════ TIKTOK (SNAPTIK) ══════════════════════════
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 URL_RE = re.compile(r"https?://(?:[\w-]+\.)?tiktok\.com/\S+", re.I)
 MAX_UPLOAD = 49 * 1024 * 1024
-TIKWM_HEADERS = {**UA, "Referer": TIKWM+"/", "Origin": TIKWM,
-                 "Accept": "application/json, text/plain, */*"}
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-_tikwm_lock, _tikwm_next = threading.Lock(), 0.0
-link_cache = {}
-last_tikwm_error = ""
+
+class SnapTikClient:
+    """Client tải video TikTok không logo qua snaptik.app"""
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(UA)
+        if PROXIES:
+            self.session.proxies.update(PROXIES)
+        self.base_url = "https://dev.snaptik.app"
+
+    def _get_token(self):
+        try:
+            r = self.session.get(f"{self.base_url}/", timeout=15)
+            m = re.search(r'name="token"\s+value="([^"]+)"', r.text)
+            if m:
+                return m.group(1)
+        except Exception as e:
+            log.warning("SnapTik get_token: %s", e)
+        return None
+
+    def _get_script(self, url):
+        token = self._get_token()
+        if not token:
+            return None
+        try:
+            r = self.session.post(f"{self.base_url}/abc2.php",
+                                  data={"token": token, "url": url},
+                                  timeout=25)
+            return r.text
+        except Exception as e:
+            log.warning("SnapTik get_script: %s", e)
+            return None
+
+    def _extract_video_url(self, script):
+        """Trích xuất URL video HD từ script trả về"""
+        # Tìm tokenhd
+        m = re.search(r'data-tokenhd="([^"]+)"', script)
+        if not m:
+            # Thử tìm trong JSON
+            m = re.search(r'"tokenhd"\s*:\s*"([^"]+)"', script)
+        if not m:
+            return None
+        tokenhd = m.group(1)
+
+        # Gọi getHdLink.php
+        try:
+            r = self.session.get(f"{self.base_url}/getHdLink.php?token={tokenhd}", timeout=15)
+            data = r.json()
+            if data.get("error"):
+                return None
+            hd_url = data.get("url")
+            if hd_url and hd_url.startswith("http"):
+                return hd_url
+        except Exception as e:
+            log.warning("SnapTik getHdLink: %s", e)
+
+        # Fallback: tìm URL video trực tiếp trong script
+        urls = re.findall(r'https?://[^\s"\']+\.mp4[^\s"\']*', script)
+        for u in urls:
+            if "watermark" not in u.lower() and "logo" not in u.lower():
+                return u
+        return urls[0] if urls else None
+
+    def fetch(self, url):
+        """Lấy link video không logo"""
+        script = self._get_script(url)
+        if not script:
+            return None
+        video_url = self._extract_video_url(script)
+        if not video_url:
+            return None
+        return {
+            "id": re.search(r'/video/(\d+)', url) or "",
+            "title": "TikTok Video",
+            "author": {"nickname": ""},
+            "hdplay": video_url,
+            "play": video_url,
+            "music": None,
+            "images": []
+        }
+
+snaptik_client = SnapTikClient()
 
 def abs_url(u):
     if not u: return ""
     if u.startswith("//"): return "https:" + u
-    if u.startswith("/"):  return TIKWM + u
+    if u.startswith("/"):  return "https://www.tikwm.com" + u
     return u
-
-def _tikwm_slot():
-    global _tikwm_next
-    with _tikwm_lock:
-        now = time.time()
-        start = max(now, _tikwm_next)
-        _tikwm_next = start + 1.2
-    if start > now: time.sleep(start - now)
-
-def tikwm_fetch(url):
-    global last_tikwm_error
-    for attempt in range(3):
-        _tikwm_slot()
-        try:
-            r = requests.post(f"{TIKWM}/api/", data={"url": url, "hd": 1},
-                              headers=TIKWM_HEADERS, timeout=25, proxies=PROXIES)
-        except Exception as e:
-            last_tikwm_error = f"không kết nối tikwm: {e}"; continue
-        try: j = r.json()
-        except ValueError:
-            last_tikwm_error = f"HTTP {r.status_code} non-JSON"
-            if r.status_code in (401, 403): break
-            continue
-        if j.get("code") == 0 and j.get("data"):
-            last_tikwm_error = ""; return j["data"]
-        last_tikwm_error = f"HTTP {r.status_code}, code={j.get('code')}, msg={j.get('msg')}"
-        if "limit" in str(j.get("msg") or "").lower():
-            time.sleep(2*(attempt+1)); continue
-        break
-    return None
 
 def download_file(url, name):
     if not url: return None
     try:
-        with requests.get(url, headers=TIKWM_HEADERS, stream=True,
+        with requests.get(url, headers=UA, stream=True,
                           timeout=(10,60), proxies=PROXIES) as r:
             r.raise_for_status()
             if int(r.headers.get("Content-Length") or 0) > MAX_UPLOAD: return None
@@ -427,8 +525,11 @@ def safe_edit(bot, chat_id, mid, text):
     except Exception: pass
 
 def deliver_tiktok(bot, chat_id, url):
-    data = tikwm_fetch(url)
-    if not data: return False, "❌ Không tải được. Video phải công khai và link đúng dạng TikTok!"
+    """Tải video TikTok không logo qua Snaptik"""
+    data = snaptik_client.fetch(url)
+    if not data or not data.get("hdplay"):
+        return False, "❌ Không tải được. Video phải công khai và link đúng dạng TikTok!"
+
     vid = str(data.get("id") or "")
     if vid: cache_put(vid, url)
     title  = (data.get("title") or "TikTok").strip()
@@ -437,25 +538,12 @@ def deliver_tiktok(bot, chat_id, url):
     if author: caption += f"\n👤 {html.escape(author)}"
     caption += "\n\n✨ <i>Đã gỡ logo thành công!</i>"
 
-    images = data.get("images") or []
-    if images:
-        imgs = [abs_url(i) for i in images]
-        try:
-            for i in range(0, len(imgs), 10):
-                group = [types.InputMediaPhoto(u, caption=caption if (i==0 and k==0) else None,
-                         parse_mode="HTML" if (i==0 and k==0) else None)
-                         for k, u in enumerate(imgs[i:i+10])]
-                bot.send_media_group(chat_id, group)
-            bot.send_message(chat_id, "🎵 Muốn lấy nhạc nền không?", reply_markup=mp3_markup(vid))
-            return True, ""
-        except Exception as e:
-            log.warning("send_media_group: %s", e); return False, "❌ Gửi ảnh thất bại!"
-
     candidates = []
     for key in ("hdplay", "play"):
-        u = abs_url(data.get(key))
+        u = data.get(key)
         if u and u not in candidates: candidates.append(u)
     if not candidates: return False, "❌ Không tìm thấy video."
+
     try: bot.send_chat_action(chat_id, "upload_video")
     except Exception: pass
     for u in candidates:
@@ -470,19 +558,30 @@ def deliver_tiktok(bot, chat_id, url):
     return True, ""
 
 def deliver_mp3(bot, chat_id, vid):
+    """Tách nhạc MP3 (dùng tikwm vì snaptik không hỗ trợ trực tiếp)"""
     url = link_cache.get(vid) or f"https://www.tiktok.com/@tiktok/video/{vid}"
-    data = tikwm_fetch(url)
-    if not data: bot.send_message(chat_id, "❌ Không trích được nhạc!"); return
-    info = data.get("music_info") or {}
-    music = abs_url(data.get("music") or info.get("play"))
-    f = download_file(music, "tiktok_audio.mp3")
-    if not f: bot.send_message(chat_id, "❌ Không tải được nhạc (video không có nhạc?)."); return
-    try: bot.send_chat_action(chat_id, "upload_audio")
-    except Exception: pass
-    bot.send_audio(chat_id, f,
-                   title=(info.get("title") or data.get("title") or "TikTok Audio")[:60],
-                   performer=(info.get("author") or "TikTok")[:60],
-                   caption="🎵 <i>Đã tách nhạc thành công!</i>")
+    # Thử tikwm cho MP3
+    try:
+        r = requests.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1},
+                          headers={**UA, "Referer": "https://www.tikwm.com/"},
+                          timeout=25, proxies=PROXIES)
+        j = r.json()
+        if j.get("code") == 0 and j.get("data"):
+            data = j["data"]
+            info = data.get("music_info") or {}
+            music = abs_url(data.get("music") or info.get("play"))
+            f = download_file(music, "tiktok_audio.mp3")
+            if f:
+                try: bot.send_chat_action(chat_id, "upload_audio")
+                except Exception: pass
+                bot.send_audio(chat_id, f,
+                               title=(info.get("title") or data.get("title") or "TikTok Audio")[:60],
+                               performer=(info.get("author") or "TikTok")[:60],
+                               caption="🎵 <i>Đã tách nhạc thành công!</i>")
+                return
+    except Exception as e:
+        log.warning("MP3 fallback: %s", e)
+    bot.send_message(chat_id, "❌ Không tải được nhạc (video không có nhạc?).")
 
 def register_downloader(bot):
     @bot.message_handler(func=lambda m: bool(URL_RE.search(m.text or "")))
@@ -515,11 +614,13 @@ def register_downloader(bot):
         finally:
             with inflight_lock: inflight.discard(key)
 
-# ================================ AI ================================
-PERSONA = ("Bạn là trợ lý chatbot hài hước, lầy lội, thân thiện, trả lời tiếng Việt ngắn gọn. Câu hỏi:")
+# ══════════════════════════ AI ══════════════════════════
+PERSONA = ("Bạn là trợ lý chatbot hài hước, lầy lội, thân thiện, trả lời tiếng Việt ngắn gọn "
+           "(dưới 150 từ). Nếu khách hỏi về data 4G/VPN/Proxy, hãy tư vấn nhiệt tình và "
+           "hướng dẫn họ vào mục Cửa hàng. Câu hỏi:")
 
 def ask_gemini(text):
-    if not ai_client: return "AI chưa cấu hình, nhưng tải TikTok vẫn ngon! 😎"
+    if not ai_client: return "AI chưa cấu hình, nhưng bot vẫn hoạt động bình thường! 😎"
     try:
         r = ai_client.models.generate_content(model=GEMINI_MODEL, contents=f"{PERSONA}\n\n{text}")
         return (r.text or "").strip() or "Hỏi lại nhé! 🤖"
@@ -546,7 +647,7 @@ def reply_ai(bot, m):
         if i == 0: bot.reply_to(m, part)
         else: bot.send_message(m.chat.id, part)
 
-# ================================ BOT CON ================================
+# ══════════════════════════ BOT CON ══════════════════════════
 def register_child_handlers(bot):
     @bot.message_handler(commands=["start", "help"])
     def _start(m):
@@ -597,7 +698,7 @@ def load_all_child_bots():
         time.sleep(0.2)
     log.info("Đã khởi động %d bot con", len(rows))
 
-# ================================ UI ================================
+# ══════════════════════════ UI ══════════════════════════
 def fmt(n): return f"{int(n):,}".replace(",", ".")
 
 def back_markup(cb="menu_back"):
@@ -619,20 +720,28 @@ def main_menu_keyboard(uid=None):
     return m
 
 def home_text(u, is_admin=False):
-    base = ("<b>🚀 HỆ THỐNG BOT ĐA NĂNG</b>\n\n<blockquote>"
-            f"🤖 <b>Bot:</b> {BOT_USERNAME}\n👑 <b>Admin:</b> {ADMIN_USERNAME}\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"🏆 <b>Tổng nạp:</b> {fmt(u['total'])}đ\n"
-            f"💰 <b>Tháng này:</b> {fmt(u['month'])}đ\n"
-            f"🏦 <b>Số dư:</b> {fmt(u['balance'])}đ</blockquote>\n\n"
-            "🎯 <b>Chức năng:</b>\n"
-            "• 💬 <b>Chat AI</b> — nhắn tin bất kỳ\n"
-            "• 📥 Tải TikTok không logo + MP3\n"
-            "• 🛒 Bán Data 4G/VPN/Proxy\n"
-            "• 🌐 Proxy dân cư Việt Nam\n"
-            "• 🤖 Tạo bot riêng (20k)")
+    title    = setting_get("home_title", "🚀 HỆ THỐNG BOT ĐA NĂNG")
+    subtitle = setting_get("home_subtitle", "TikTok • Data 4G • Proxy • AI")
+    footer   = setting_get("footer_note", "")
+    base = (
+        f"<b>{html.escape(title)}</b>\n"
+        f"<i>{html.escape(subtitle)}</i>\n\n<blockquote>"
+        f"🤖 <b>Bot:</b> {BOT_USERNAME}\n"
+        f"👑 <b>Admin:</b> {ADMIN_USERNAME}\n"
+        "━━━━━━━━━━━━━━━━\n"
+        f"🏆 <b>Tổng nạp:</b> {fmt(u['total'])}đ\n"
+        f"💰 <b>Tháng này:</b> {fmt(u['month'])}đ\n"
+        f"🏦 <b>Số dư:</b> {fmt(u['balance'])}đ</blockquote>\n\n"
+        "🎯 <b>Bạn có thể:</b>\n"
+        "• 💬 <b>Chat AI</b> — nhắn tin bất kỳ\n"
+        "• 📥 Tải TikTok không logo + MP3\n"
+        "• 🛒 Mua Data 4G / VPN / Proxy\n"
+        "• 🤖 Tạo bot riêng (20k)"
+    )
     if is_admin:
         base += "\n\n👑 <b>Bạn là ADMIN</b> — bấm <b>ADMIN PANEL</b> để quản lý"
+    if footer:
+        base += f"\n\n<i>{html.escape(footer)}</i>"
     return base
 
 def shop_home_markup():
@@ -648,7 +757,8 @@ def shop_home_markup():
 
 def shop_home_text():
     prods = shop_list()
-    return (f"<b>🛒 CỬA HÀNG DATA / VPN / PROXY</b>\n\n<blockquote>"
+    title = setting_get("shop_title", "🛒 CỬA HÀNG DATA / VPN / PROXY")
+    return (f"<b>{html.escape(title)}</b>\n\n<blockquote>"
             f"📦 Có <b>{len(prods)}</b> sản phẩm đang bán\n"
             f"💰 Thanh toán bằng số dư ví\n"
             f"📱 Viettel • VinaPhone • MobiFone</blockquote>\n\n"
@@ -669,7 +779,219 @@ def product_markup(pid, stock):
     m.add(types.InlineKeyboardButton("🔙 Về Cửa Hàng", callback_data="shop_home"))
     return m
 
-# ================================ MAIN HANDLERS ================================
+# ══════════════════════════ ADMIN UI HELPERS ══════════════════════════
+def _show_product_manager(call, page=0):
+    prods = shop_list(only_active=False, limit=200)
+    per_page = 8
+    total_pages = max(1, (len(prods) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    chunk = prods[page*per_page:(page+1)*per_page]
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for p in chunk:
+        icon = "✅" if p.get("active", 1) else "⛔"
+        kb.add(types.InlineKeyboardButton(
+            f"{icon} #{p['id']} {p['name'][:35]} — {fmt(p['price'])}đ",
+            callback_data=f"adm_prod_view|{p['id']}"))
+
+    nav = []
+    if page > 0:
+        nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_prod_page|{page-1}"))
+    nav.append(types.InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(types.InlineKeyboardButton("➡️", callback_data=f"adm_prod_page|{page+1}"))
+    if nav: kb.row(*nav)
+
+    kb.add(types.InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_panel"))
+
+    _safe_show(call,
+        f"<b>🛍️ QUẢN LÝ SẢN PHẨM</b>\n\n"
+        f"📦 Tổng: <b>{len(prods)}</b> sản phẩm\n"
+        f"Trang <b>{page+1}/{total_pages}</b>\n\n"
+        f"👇 Bấm sản phẩm để <b>sửa / xóa / bật-tắt</b>:\n\n"
+        f"💡 Thêm SP mới: <code>/addproduct Tên | giá | danh_mục | dtype | data | mô_tả</code>", kb)
+
+
+def _show_product_detail_admin(call, pid, note=""):
+    p = shop_get(pid)
+    if not p:
+        _safe_show(call, "❌ Sản phẩm không tồn tại.", back_markup("adm_products")); return
+    stock_txt = "♾️ Vô hạn" if p["stock"] < 0 else ("Hết hàng" if p["stock"] == 0 else f"{p['stock']}")
+    status = "✅ Đang bán" if p["active"] else "⛔ Đã tắt"
+    txt = (
+        f"<b>📦 CHI TIẾT SẢN PHẨM #{pid}</b>\n\n"
+        + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
+        + f"<blockquote>"
+        f"📝 Tên: <b>{html.escape(p['name'])}</b>\n"
+        f"💵 Giá: <b>{fmt(p['price'])}đ</b>\n"
+        f"📂 Danh mục: <b>{html.escape(p['category'])}</b>\n"
+        f"📊 Tồn kho: <b>{stock_txt}</b>\n"
+        f"🔥 Đã bán: <b>{p['sold']}</b>\n"
+        f"🔖 Trạng thái: <b>{status}</b>\n"
+        f"🚚 Kiểu giao: <b>{p['delivery_type']}</b>"
+        f"</blockquote>\n\n"
+        f"<b>Mô tả:</b>\n<i>{html.escape(p['description'][:300])}</i>"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(types.InlineKeyboardButton("✏️ Sửa tên", callback_data=f"adm_prod_edit|{pid}|name"),
+           types.InlineKeyboardButton("💵 Sửa giá", callback_data=f"adm_prod_edit|{pid}|price"))
+    kb.add(types.InlineKeyboardButton("📂 Sửa danh mục", callback_data=f"adm_prod_edit|{pid}|category"),
+           types.InlineKeyboardButton("📊 Sửa tồn kho", callback_data=f"adm_prod_edit|{pid}|stock"))
+    kb.add(types.InlineKeyboardButton("📝 Sửa mô tả", callback_data=f"adm_prod_edit|{pid}|description"),
+           types.InlineKeyboardButton("🚚 Sửa nội dung", callback_data=f"adm_prod_edit|{pid}|delivery_data"))
+    toggle_txt = "⛔ Tắt bán" if p["active"] else "✅ Bật bán"
+    kb.add(types.InlineKeyboardButton(toggle_txt, callback_data=f"adm_prod_toggle|{pid}"))
+    kb.add(types.InlineKeyboardButton("🗑️ XÓA SẢN PHẨM NÀY", callback_data=f"adm_prod_del|{pid}"))
+    kb.add(types.InlineKeyboardButton("🔙 DS sản phẩm", callback_data="adm_products"))
+    _safe_show(call, txt, kb)
+
+
+def _show_proxy_list_admin(call, page=0, note=""):
+    with db() as c:
+        rows = c.execute("""SELECT id,ip,port,username,protocol,region,isp,status,
+                            sold_to,expires_at FROM proxy_stock
+                            ORDER BY status DESC, id DESC LIMIT 200""").fetchall()
+    per_page = 8
+    total_pages = max(1, (len(rows) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page*per_page:(page+1)*per_page]
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for r in chunk:
+        icon = "🟢" if r[7] == "available" else "🔴"
+        tag = "(trống)" if r[7] == "available" else f"→ {r[8]}"
+        kb.add(types.InlineKeyboardButton(
+            f"{icon} #{r[0]} {r[1]}:{r[2]} {r[5] or ''} {tag}"[:60],
+            callback_data=f"adm_proxy_view|{r[0]}"))
+
+    nav = []
+    if page > 0:
+        nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_proxy_page|{page-1}"))
+    nav.append(types.InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(types.InlineKeyboardButton("➡️", callback_data=f"adm_proxy_page|{page+1}"))
+    if nav: kb.row(*nav)
+
+    kb.add(types.InlineKeyboardButton("➕ Nhập thêm proxy", callback_data="adm_proxy_import"))
+    kb.add(types.InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_panel"))
+
+    _safe_show(call,
+        f"<b>📋 DANH SÁCH PROXY</b>\n\n"
+        + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
+        + f"Tổng: <b>{len(rows)}</b> | Trang <b>{page+1}/{total_pages}</b>\n\n"
+        f"🟢 = còn bán | 🔴 = đã bán\n"
+        f"👇 Bấm để xem/xóa:", kb)
+
+
+def _show_proxy_detail_admin(call, pid):
+    with db() as c:
+        r = c.execute("""SELECT id,ip,port,username,password,protocol,region,isp,
+                         status,sold_to,expires_at,note FROM proxy_stock WHERE id=?""",
+                      (pid,)).fetchone()
+    if not r:
+        _safe_show(call, "❌ Không tìm thấy.", back_markup("adm_proxy_list")); return
+    status = "🟢 Còn bán" if r[8] == "available" else f"🔴 Đã bán → <code>{r[9]}</code>"
+    txt = (
+        f"<b>🌐 CHI TIẾT PROXY #{pid}</b>\n\n<blockquote>"
+        f"🌐 IP: <code>{r[1]}</code>\n"
+        f"🔌 Port: <code>{r[2]}</code>\n"
+    )
+    if r[3]: txt += f"👤 User: <code>{r[3]}</code>\n"
+    if r[4]: txt += f"🔑 Pass: <code>{r[4]}</code>\n"
+    txt += f"📡 Protocol: <b>{r[5]}</b>\n"
+    if r[6]: txt += f"📍 Khu vực: <b>{r[6]}</b>\n"
+    if r[7]: txt += f"🏢 Nhà mạng: <b>{r[7]}</b>\n"
+    txt += f"📊 Trạng thái: <b>{status}</b>\n"
+    if r[10]: txt += f"📅 Hết hạn: <b>{r[10]}</b>\n"
+    txt += "</blockquote>"
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🗑️ XÓA PROXY NÀY", callback_data=f"adm_proxy_del|{pid}"))
+    kb.add(types.InlineKeyboardButton("🔙 DS proxy", callback_data="adm_proxy_list"))
+    _safe_show(call, txt, kb)
+
+
+def _ui_text():
+    s = setting_all()
+    txt = "<b>🎨 TÙY CHỈNH GIAO DIỆN</b>\n\n"
+    txt += "<i>Bấm vào mục để sửa nội dung hiển thị cho khách:</i>\n\n"
+    items = [
+        ("home_title",    "🏠 Tiêu đề trang chủ"),
+        ("home_subtitle", "📝 Phụ đề trang chủ"),
+        ("welcome_msg",   "👋 Lời chào /start"),
+        ("shop_title",    "🛒 Tiêu đề cửa hàng"),
+        ("support_text",  "🎛️ Nội dung hỗ trợ"),
+        ("footer_note",   "🔖 Ghi chú cuối"),
+    ]
+    for k, label in items:
+        v = (s.get(k) or "")[:60]
+        txt += f"{label}\n<i>→ {html.escape(v)}</i>\n\n"
+    return txt
+
+
+def _ui_markup():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(types.InlineKeyboardButton("🏠 Sửa tiêu đề", callback_data="adm_ui_edit|home_title"),
+           types.InlineKeyboardButton("📝 Sửa phụ đề", callback_data="adm_ui_edit|home_subtitle"))
+    kb.add(types.InlineKeyboardButton("👋 Sửa lời chào", callback_data="adm_ui_edit|welcome_msg"),
+           types.InlineKeyboardButton("🛒 Sửa tên shop", callback_data="adm_ui_edit|shop_title"))
+    kb.add(types.InlineKeyboardButton("🎛️ Sửa hỗ trợ", callback_data="adm_ui_edit|support_text"),
+           types.InlineKeyboardButton("🔖 Sửa ghi chú", callback_data="adm_ui_edit|footer_note"))
+    kb.add(types.InlineKeyboardButton("🔄 Khôi phục mặc định", callback_data="adm_ui_reset"))
+    kb.add(types.InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_panel"))
+    return kb
+
+
+def admin_panel_text():
+    with db() as c:
+        total_p = c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        active_p = c.execute("SELECT COUNT(*) FROM products WHERE active=1").fetchone()[0]
+        total_u = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_o = c.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        total_rev = c.execute("SELECT COALESCE(SUM(price),0) FROM orders").fetchone()[0]
+        total_bal = c.execute("SELECT COALESCE(SUM(balance),0) FROM users").fetchone()[0]
+    s = proxy_stock_count()
+    return (
+        "<b>👑 BẢNG ĐIỀU KHIỂN ADMIN</b>\n\n<blockquote>"
+        f"👥 Người dùng: <b>{total_u}</b>\n"
+        f"📦 Sản phẩm: <b>{total_p}</b> (đang bán: <b>{active_p}</b>)\n"
+        f"🛒 Đơn hàng: <b>{total_o}</b>\n"
+        f"💰 Doanh thu: <b>{fmt(total_rev)}đ</b>\n"
+        f"🏦 Tổng số dư user: <b>{fmt(total_bal)}đ</b>\n"
+        f"🌐 Proxy tồn: <b>{s['available']}</b> / đã bán <b>{s['sold']}</b>"
+        "</blockquote>\n\n"
+        "👇 <b>Chọn chức năng bên dưới:</b>"
+    )
+
+def admin_panel_markup():
+    m = types.InlineKeyboardMarkup(row_width=2)
+    m.add(types.InlineKeyboardButton("🛍️ Quản lý sản phẩm", callback_data="adm_products"),
+          types.InlineKeyboardButton("🌐 Quản lý Proxy", callback_data="adm_proxy"))
+    m.add(types.InlineKeyboardButton("💰 Cấp tiền user", callback_data="adm_grant"),
+          types.InlineKeyboardButton("📊 Thống kê chi tiết", callback_data="adm_stats"))
+    m.add(types.InlineKeyboardButton("🎨 Đổi giao diện", callback_data="adm_ui"),
+          types.InlineKeyboardButton("📣 Gửi thông báo", callback_data="adm_broadcast"))
+    m.add(types.InlineKeyboardButton("💾 Sao lưu dữ liệu", callback_data="adm_export"),
+          types.InlineKeyboardButton("⚙️ Cấu hình bot", callback_data="adm_config"))
+    m.add(types.InlineKeyboardButton("🔙 Về Menu chính", callback_data="menu_back"))
+    return m
+
+
+def _safe_show(call, text, markup=None):
+    cid, mid = call.message.chat.id, call.message.message_id
+    if call.message.content_type == "text":
+        try:
+            main_bot.edit_message_text(text, cid, mid, reply_markup=markup)
+            return
+        except ApiTelegramException as e:
+            if "not modified" in str(e): return
+        except Exception: pass
+    try: main_bot.delete_message(cid, mid)
+    except Exception: pass
+    try: main_bot.send_message(cid, text, reply_markup=markup)
+    except Exception as e: log.warning("_safe_show: %s", e)
+
+# ══════════════════════════ MAIN HANDLERS ══════════════════════════
 def user_from(tg):
     return get_or_create_user(tg.id, tg.username or "", tg.first_name or "Khách")
 
@@ -678,6 +1000,10 @@ def send_welcome(m):
     user_states.pop(m.from_user.id, None)
     u = user_from(m.from_user)
     is_admin = m.from_user.id == ADMIN_ID
+    welcome = setting_get("welcome_msg", "")
+    if welcome:
+        try: main_bot.send_message(m.chat.id, html.escape(welcome))
+        except Exception: pass
     main_bot.send_message(m.chat.id, home_text(u, is_admin),
                           reply_markup=main_menu_keyboard(m.from_user.id))
 
@@ -712,15 +1038,20 @@ def send_qr(call, amount, memo, title, note):
         log.warning("QR lỗi: %s", e)
         main_bot.send_message(call.message.chat.id, caption, reply_markup=kb)
 
-# ================================ CALLBACKS ================================
+# ══════════════════════════ CALLBACK LISTENER ══════════════════════════
+@main_bot.callback_query_handler(func=lambda c: (c.data or "") == "noop")
+def _noop(c):
+    try: main_bot.answer_callback_query(c.id, "Trang hiện tại")
+    except Exception: pass
+
 @main_bot.callback_query_handler(func=lambda c: True)
 def callback_listener(call):
     data = call.data or ""
+    if data == "noop": return
     uid = call.from_user.id
     is_admin = uid == ADMIN_ID
     u = user_from(call.from_user)
 
-    # Chặn callback lạ không phải của mình
     if not data.startswith(("menu_", "dep|", "shop_", "proxy_", "adm_", "dl_")):
         try: main_bot.answer_callback_query(call.id)
         except Exception: pass
@@ -729,7 +1060,7 @@ def callback_listener(call):
     try: main_bot.answer_callback_query(call.id)
     except Exception: pass
 
-    # ---------- ADMIN ----------
+    # ═══════════ ADMIN ═══════════
     if data == "adm_panel":
         if not is_admin: return
         show(call, admin_panel_text(), admin_panel_markup())
@@ -743,7 +1074,7 @@ def callback_listener(call):
                    "Ví dụ:\n"
                    "<code>123456789 50000</code>\n"
                    "<code>@nguyenvana 100000</code>\n\n"
-                   "Có thể nhập số âm để <b>trừ tiền</b>.\n"
+                   "💡 Nhập số âm để <b>trừ tiền</b>.\n"
                    "Gõ /cancel để hủy.", back_markup("adm_panel"))
 
     elif data == "adm_stats":
@@ -753,60 +1084,212 @@ def callback_listener(call):
             bots  = c.execute("SELECT COUNT(*) FROM user_bots WHERE status='active'").fetchone()[0]
             dep   = c.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='deposit'").fetchone()[0]
             orders = c.execute("SELECT COUNT(*), COALESCE(SUM(price),0) FROM orders").fetchone()
+            top_u = c.execute("""SELECT user_id, balance FROM users
+                                 ORDER BY balance DESC LIMIT 5""").fetchall()
         s = proxy_stock_count()
-        show(call,
-            f"<b>📊 THỐNG KÊ HỆ THỐNG</b>\n\n<blockquote>"
-            f"👥 Users: <b>{users}</b>\n"
-            f"🤖 Bot con: <b>{bots}</b>\n"
-            f"💰 Tổng nạp: <b>{fmt(dep)}đ</b>\n"
-            f"🛒 Đơn hàng: <b>{orders[0]}</b> – <b>{fmt(orders[1])}đ</b>\n"
-            f"🌐 Proxy tồn: <b>{s['available']}</b> / đã bán <b>{s['sold']}</b>\n"
-            f"💾 DB: <code>{html.escape(DB_PATH)}</code>"
-            f"</blockquote>", back_markup("adm_panel"))
+        txt = (f"<b>📊 THỐNG KÊ CHI TIẾT</b>\n\n<blockquote>"
+               f"👥 Users: <b>{users}</b>\n"
+               f"🤖 Bot con: <b>{bots}</b>\n"
+               f"💰 Tổng nạp: <b>{fmt(dep)}đ</b>\n"
+               f"🛒 Đơn hàng: <b>{orders[0]}</b> – <b>{fmt(orders[1])}đ</b>\n"
+               f"🌐 Proxy tồn: <b>{s['available']}</b> / đã bán <b>{s['sold']}</b>\n"
+               f"💾 DB: <code>{html.escape(DB_PATH)}</code>"
+               f"</blockquote>\n\n<b>🏆 Top 5 user giàu nhất:</b>\n")
+        for uu, bal in top_u:
+            txt += f"• <code>{uu}</code> – <b>{fmt(bal)}đ</b>\n"
+        show(call, txt, back_markup("adm_panel"))
 
     elif data == "adm_broadcast":
         if not is_admin: return
         user_states[uid] = "ADMIN_WAITING_BROADCAST"
-        show(call, "<b>📣 BROADCAST</b>\n\nGửi tin nhắn bạn muốn gửi tới <b>tất cả user</b>.\n"
+        show(call, "<b>📣 GỬI THÔNG BÁO</b>\n\n"
+                   "Gửi tin nhắn bạn muốn gửi tới <b>tất cả user</b>.\n"
                    "Gõ /cancel để hủy.", back_markup("adm_panel"))
 
     elif data == "adm_products":
         if not is_admin: return
-        prods = shop_list(only_active=False, limit=100)
-        txt = "<b>📦 QUẢN LÝ SẢN PHẨM</b>\n\n"
-        if not prods:
-            txt += "<i>Chưa có sản phẩm nào.</i>"
+        _show_product_manager(call, page=0)
+
+    elif data.startswith("adm_prod_page|"):
+        if not is_admin: return
+        _show_product_manager(call, page=int(data.split("|")[1]))
+
+    elif data.startswith("adm_prod_view|"):
+        if not is_admin: return
+        _show_product_detail_admin(call, int(data.split("|")[1]))
+
+    elif data.startswith("adm_prod_del|"):
+        if not is_admin: return
+        pid = int(data.split("|")[1])
+        p = shop_get(pid)
+        if not p:
+            _safe_show(call, "❌ Sản phẩm không tồn tại.", back_markup("adm_products")); return
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("✅ XÁC NHẬN XÓA", callback_data=f"adm_prod_delok|{pid}"),
+               types.InlineKeyboardButton("❌ Hủy", callback_data=f"adm_prod_view|{pid}"))
+        _safe_show(call,
+            f"<b>⚠️ XÁC NHẬN XÓA</b>\n\n"
+            f"Bạn có chắc muốn xóa vĩnh viễn:\n<b>{html.escape(p['name'])}</b>\n\n"
+            f"❌ Thao tác này KHÔNG thể hoàn tác!", kb)
+
+    elif data.startswith("adm_prod_delok|"):
+        if not is_admin: return
+        pid = int(data.split("|")[1])
+        p = shop_get(pid)
+        if p:
+            product_delete(pid)
+            _safe_show(call,
+                f"✅ <b>ĐÃ XÓA SẢN PHẨM</b>\n\n📦 {html.escape(p['name'])}",
+                types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("🔙 DS sản phẩm", callback_data="adm_products")))
         else:
-            for p in prods[:30]:
-                txt += f"<code>{p['id']:>3}</code> | {html.escape(p['name'][:35])} | {fmt(p['price'])}đ | {p['category']}\n"
-        txt += ("\n\n<b>Lệnh:</b>\n"
-                "• <code>/addproduct Tên | giá | danh_mục | dtype | data | mô_tả</code>\n"
-                "• <code>/delproduct &lt;id&gt;</code>")
-        show(call, txt, back_markup("adm_panel"))
+            _safe_show(call, "❌ Đã bị xóa trước đó.", back_markup("adm_products"))
+
+    elif data.startswith("adm_prod_toggle|"):
+        if not is_admin: return
+        pid = int(data.split("|")[1])
+        new = product_toggle(pid)
+        if new is None:
+            _safe_show(call, "❌ Không tìm thấy.", back_markup("adm_products")); return
+        status = "✅ Đang bán" if new else "⛔ Đã tắt"
+        _show_product_detail_admin(call, pid, note=f"Trạng thái: {status}")
+
+    elif data.startswith("adm_prod_edit|"):
+        if not is_admin: return
+        parts_d = data.split("|")
+        pid = int(parts_d[1])
+        field = parts_d[2]
+        user_states[uid] = f"ADMIN_EDIT_PRODUCT|{pid}|{field}"
+        field_vn = {"name": "Tên sản phẩm", "price": "Giá (VNĐ)",
+                    "description": "Mô tả", "category": "Danh mục",
+                    "stock": "Tồn kho (-1 = vô hạn)",
+                    "delivery_data": "Nội dung giao hàng"}.get(field, field)
+        p = shop_get(pid)
+        cur_val = ""
+        if p:
+            if field == "price": cur_val = fmt(p["price"]) + "đ"
+            elif field == "stock": cur_val = "Vô hạn" if p["stock"] < 0 else str(p["stock"])
+            else: cur_val = str(p.get(field, ""))[:300]
+        _safe_show(call,
+            f"<b>✏️ SỬA: {field_vn}</b>\n\n"
+            f"<b>Giá trị hiện tại:</b>\n<blockquote>{html.escape(cur_val)}</blockquote>\n\n"
+            f"Nhập giá trị mới vào ô chat.\n"
+            f"Gõ /cancel để hủy.",
+            back_markup(f"adm_prod_view|{pid}"))
 
     elif data == "adm_proxy":
         if not is_admin: return
         s = proxy_stock_count()
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("➕ Nhập proxy", callback_data="adm_proxy_import"),
+               types.InlineKeyboardButton("📋 DS proxy", callback_data="adm_proxy_list"))
+        kb.add(types.InlineKeyboardButton("🗑️ Xóa proxy hết hạn", callback_data="adm_proxy_clean"),
+               types.InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_panel"))
         show(call,
             f"<b>🌐 QUẢN LÝ KHO PROXY</b>\n\n<blockquote>"
             f"✅ Còn bán: <b>{s['available']}</b>\n"
             f"💰 Đã bán: <b>{s['sold']}</b>\n"
             f"📊 Tổng: <b>{s['total']}</b></blockquote>\n\n"
-            f"• <code>/importproxy</code> — thêm proxy vào kho\n"
-            f"• <code>/clearexpiredproxy</code> — xóa proxy hết hạn",
+            "👇 Chọn thao tác:", kb)
+
+    elif data == "adm_proxy_import":
+        if not is_admin: return
+        user_states[uid] = "ADMIN_IMPORT_PROXY"
+        _safe_show(call,
+            "<b>📥 NHẬP PROXY VÀO KHO</b>\n\n"
+            "Gửi danh sách proxy, mỗi dòng 1 proxy theo cú pháp:\n"
+            "<code>ip:port:user:pass | Khu vực | Nhà mạng | Giao thức</code>\n\n"
+            "<b>Ví dụ:</b>\n"
+            "<code>113.22.55.10:8080:user1:pass123 | Hà Nội | Viettel | HTTP</code>\n"
+            "<code>27.72.99.5:3128:: | HCM | Vinaphone | SOCKS5</code>\n\n"
+            "💡 Có thể bỏ trống user/pass, khu vực, nhà mạng.\n"
+            "Gõ /cancel để hủy.", back_markup("adm_proxy"))
+
+    elif data == "adm_proxy_list":
+        if not is_admin: return
+        _show_proxy_list_admin(call, page=0)
+
+    elif data.startswith("adm_proxy_page|"):
+        if not is_admin: return
+        _show_proxy_list_admin(call, page=int(data.split("|")[1]))
+
+    elif data.startswith("adm_proxy_view|"):
+        if not is_admin: return
+        _show_proxy_detail_admin(call, int(data.split("|")[1]))
+
+    elif data.startswith("adm_proxy_del|"):
+        if not is_admin: return
+        pid = int(data.split("|")[1])
+        with db() as c:
+            c.execute("DELETE FROM proxy_stock WHERE id=?", (pid,))
+        _show_proxy_list_admin(call, page=0, note=f"✅ Đã xóa proxy #{pid}")
+
+    elif data == "adm_proxy_clean":
+        if not is_admin: return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with db() as c:
+            cur = c.execute("""DELETE FROM proxy_stock
+                               WHERE status='sold' AND expires_at != '' AND expires_at < ?""",
+                            (now,))
+            n = cur.rowcount
+        show(call, f"✅ Đã xóa <b>{n}</b> proxy hết hạn.", back_markup("adm_proxy"))
+
+    elif data == "adm_ui":
+        if not is_admin: return
+        show(call, _ui_text(), _ui_markup())
+
+    elif data.startswith("adm_ui_edit|"):
+        if not is_admin: return
+        key = data.split("|", 1)[1]
+        user_states[uid] = f"ADMIN_EDIT_SETTING|{key}"
+        key_vn = {"home_title": "Tiêu đề trang chủ", "home_subtitle": "Phụ đề trang chủ",
+                  "welcome_msg": "Lời chào /start", "shop_title": "Tiêu đề cửa hàng",
+                  "support_text": "Nội dung hỗ trợ", "footer_note": "Ghi chú cuối trang"}.get(key, key)
+        cur_val = setting_get(key, "")
+        show(call,
+            f"<b>🎨 SỬA GIAO DIỆN</b>\n\n"
+            f"📝 Mục: <b>{key_vn}</b>\n\n"
+            f"<b>Giá trị hiện tại:</b>\n<blockquote>{html.escape(cur_val[:300])}</blockquote>\n\n"
+            f"Nhập nội dung mới.\nHỗ trợ emoji, không hỗ trợ HTML.\n"
+            f"Gõ /cancel để hủy.", back_markup("adm_ui"))
+
+    elif data == "adm_ui_reset":
+        if not is_admin: return
+        defaults = {
+            "home_title":    "🚀 HỆ THỐNG BOT ĐA NĂNG",
+            "home_subtitle": "TikTok • Data 4G • Proxy • AI",
+            "welcome_msg":   "Chào mừng bạn! Nhắn tin bất kỳ để chat với AI, gửi link TikTok để tải video.",
+            "shop_title":    "🛒 CỬA HÀNG DATA / VPN / PROXY",
+            "support_text":  "Nhắn admin để được hỗ trợ nhanh nhất!",
+            "footer_note":   "Cảm ơn bạn đã sử dụng dịch vụ! ❤️",
+        }
+        for k, v in defaults.items(): setting_set(k, v)
+        show(call, "✅ Đã khôi phục giao diện mặc định.", back_markup("adm_ui"))
+
+    elif data == "adm_config":
+        if not is_admin: return
+        show(call,
+            "<b>⚙️ CẤU HÌNH BOT</b>\n\n<blockquote>"
+            f"👑 Admin ID: <code>{ADMIN_ID}</code>\n"
+            f"🤖 Bot: {BOT_USERNAME}\n"
+            f"🏦 Ngân hàng: <b>{BANK_NAME}</b>\n"
+            f"💳 STK: <code>{ACCOUNT_NO}</code>\n"
+            f"👤 Chủ TK: <b>{ACCOUNT_NAME}</b>\n"
+            f"💰 Phí tạo bot: <b>{fmt(CREATE_BOT_FEE)}đ</b>\n"
+            f"⏱ Cooldown AI: <b>{AI_COOLDOWN}s</b>"
+            "</blockquote>\n\n"
+            "💡 Đổi cấu hình → sửa biến môi trường trên Render rồi deploy lại.",
             back_markup("adm_panel"))
 
     elif data == "adm_export":
         if not is_admin: return
-        show(call, "<b>💾 EXPORT DB</b>\n\n"
-                   "Bot sẽ gửi file <code>bot_database.db</code> cho bạn.",
-             back_markup("adm_panel"))
-        try: main_bot.send_document(uid, open(DB_PATH, "rb"),
-                caption=f"💾 Backup DB — {datetime.now():%Y-%m-%d %H:%M}")
+        try:
+            main_bot.send_document(uid, open(DB_PATH, "rb"),
+                caption=f"💾 Sao lưu DB — {datetime.now():%Y-%m-%d %H:%M}")
         except Exception as e:
             main_bot.send_message(uid, f"❌ Lỗi: {e}")
 
-    # ---------- MAIN MENU ----------
+    # ═══════════ MAIN MENU ═══════════
     elif data == "menu_profile":
         show(call,
             f"<b>📊 THÔNG TIN TÀI KHOẢN</b>\n\n<blockquote>"
@@ -827,7 +1310,7 @@ def callback_listener(call):
         else:
             user_states[uid] = "WAITING_BOT_TOKEN"
             show(call, f"<b>🤖 TẠO BOT TỰ ĐỘNG</b>\n\n"
-                       f"💰 Phí {fmt(CREATE_BOT_FEE)}đ (trừ sau khi kích hoạt thành công)\n\n"
+                       f"💰 Phí {fmt(CREATE_BOT_FEE)}đ (trừ sau khi kích hoạt)\n\n"
                        "1️⃣ Mở @BotFather → /newbot\n"
                        "2️⃣ Copy Token và gửi vào đây:", back_markup())
 
@@ -854,17 +1337,18 @@ def callback_listener(call):
         send_qr(call, 0, f"DONATE{uid}", "❤️ DONATE ỦNG HỘ", "🙏 Cảm ơn bạn!")
 
     elif data == "menu_support":
+        txt = setting_get("support_text", "Nhắn admin để được hỗ trợ!")
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton("💬 Nhắn Admin",
                 url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"),
                types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_back"))
-        show(call, f"<b>🎛️ HỖ TRỢ</b>\n\nAdmin: {ADMIN_USERNAME}", kb)
+        show(call, f"<b>🎛️ HỖ TRỢ</b>\n\n{html.escape(txt)}\n\n👑 Admin: {ADMIN_USERNAME}", kb)
 
     elif data == "menu_back":
         user_states.pop(uid, None)
         show(call, home_text(u, is_admin), main_menu_keyboard(uid))
 
-    # ---------- SHOP ----------
+    # ═══════════ SHOP ═══════════
     elif data == "shop_home":
         show(call, shop_home_text(), shop_home_markup())
 
@@ -929,11 +1413,10 @@ def callback_listener(call):
                        f"❌ Thiếu: <b>{fmt(miss)}đ</b>", kb)
             return
 
-        # ===== XÓA TIN NHẮN CŨ =====
         try: main_bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception: pass
 
-        # ===== PROXY: dùng hàm riêng =====
+        # ─── PROXY ───
         if p["delivery_type"] == "proxy":
             ok, err, info = proxy_buy(uid, pid)
             if not ok:
@@ -948,12 +1431,11 @@ def callback_listener(call):
             kb.add(types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my"))
             line = (f"{info['protocol'].lower()}://{info['username']}:{info['password']}@{info['ip']}:{info['port']}"
                     if info['username'] else f"{info['protocol'].lower()}://{info['ip']}:{info['port']}")
-            txt = (
-                f"<b>📦 {html.escape(info['name'])}</b>\n\n<blockquote>"
-                f"⏱ Hạn: <b>{info['days']} ngày</b>\n"
-                f"📅 Hết hạn: <b>{info['expires_at']}</b>\n"
-                f"🌐 IP: <code>{info['ip']}</code>\n"
-                f"🔌 Port: <code>{info['port']}</code>\n")
+            txt = (f"<b>📦 {html.escape(info['name'])}</b>\n\n<blockquote>"
+                   f"⏱ Hạn: <b>{info['days']} ngày</b>\n"
+                   f"📅 Hết hạn: <b>{info['expires_at']}</b>\n"
+                   f"🌐 IP: <code>{info['ip']}</code>\n"
+                   f"🔌 Port: <code>{info['port']}</code>\n")
             if info['username']: txt += f"👤 User: <code>{info['username']}</code>\n"
             if info['password']: txt += f"🔑 Pass: <code>{info['password']}</code>\n"
             txt += f"📡 Protocol: <b>{info['protocol']}</b>\n"
@@ -971,7 +1453,7 @@ def callback_listener(call):
             except Exception: pass
             return
 
-        # ===== SẢN PHẨM THƯỜNG (data / link / text / file) =====
+        # ─── SẢN PHẨM THƯỜNG ───
         ok, res = shop_purchase(uid, pid)
         if not ok:
             main_bot.send_message(call.message.chat.id, f"❌ Mua thất bại: {res}",
@@ -1027,7 +1509,7 @@ def callback_listener(call):
         txt += "</blockquote>"
         show(call, txt, back_markup("shop_home"))
 
-    # ---------- PROXY ----------
+    # ═══════════ PROXY ═══════════
     elif data == "proxy_my":
         rows = proxy_my_list(uid)
         if not rows:
@@ -1065,12 +1547,11 @@ def callback_listener(call):
         status_txt = "🟢 Còn hạn" if is_active else "🔴 Đã hết hạn"
         line = (f"{r[4].lower()}://{r[2]}:{r[3]}@{r[0]}:{r[1]}" if r[2]
                 else f"{r[4].lower()}://{r[0]}:{r[1]}")
-        txt = (
-            f"<b>🌐 CHI TIẾT PROXY</b>\n\n<blockquote>"
-            f"Trạng thái: <b>{status_txt}</b>\n"
-            f"📅 Hết hạn: <b>{r[7]}</b>\n"
-            f"🌐 IP: <code>{r[0]}</code>\n"
-            f"🔌 Port: <code>{r[1]}</code>\n")
+        txt = (f"<b>🌐 CHI TIẾT PROXY</b>\n\n<blockquote>"
+               f"Trạng thái: <b>{status_txt}</b>\n"
+               f"📅 Hết hạn: <b>{r[7]}</b>\n"
+               f"🌐 IP: <code>{r[0]}</code>\n"
+               f"🔌 Port: <code>{r[1]}</code>\n")
         if r[2]: txt += f"👤 User: <code>{r[2]}</code>\n"
         if r[3]: txt += f"🔑 Pass: <code>{r[3]}</code>\n"
         txt += f"📡 Protocol: <b>{r[4]}</b>\n"
@@ -1079,30 +1560,7 @@ def callback_listener(call):
         txt += f"</blockquote>\n\n<b>📖 Chuỗi kết nối:</b>\n<code>{html.escape(line)}</code>"
         show(call, txt, back_markup("proxy_my"))
 
-# ================================ ADMIN PANEL UI ================================
-def admin_panel_text():
-    return ("<b>👑 ADMIN PANEL</b>\n\n<blockquote>"
-            "Chọn chức năng bên dưới.\n\n"
-            "💡 Các lệnh nhanh:\n"
-            "• <code>/addproduct</code> — thêm sản phẩm\n"
-            "• <code>/delproduct</code> — xóa sản phẩm\n"
-            "• <code>/importproxy</code> — nhập proxy\n"
-            "• <code>/broadcast</code> — gửi thông báo\n"
-            "• <code>/testtiktok</code> — test TikTok\n"
-            "</blockquote>")
-
-def admin_panel_markup():
-    m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("💰 Cấp tiền", callback_data="adm_grant"),
-          types.InlineKeyboardButton("📊 Thống kê", callback_data="adm_stats"))
-    m.add(types.InlineKeyboardButton("📦 Sản phẩm", callback_data="adm_products"),
-          types.InlineKeyboardButton("🌐 Kho Proxy", callback_data="adm_proxy"))
-    m.add(types.InlineKeyboardButton("📣 Broadcast", callback_data="adm_broadcast"),
-          types.InlineKeyboardButton("💾 Export DB", callback_data="adm_export"))
-    m.add(types.InlineKeyboardButton("🔙 Menu Chính", callback_data="menu_back"))
-    return m
-
-# ================================ STATE HANDLERS ================================
+# ══════════════════════════ STATE HANDLERS ══════════════════════════
 TOKEN_RE = re.compile(r"^\d{6,12}:[A-Za-z0-9_-]{30,50}$")
 
 @main_bot.message_handler(commands=["cancel"])
@@ -1221,9 +1679,65 @@ def admin_import_proxy_handler(m):
     txt += f"📦 Tồn kho: <b>{s['available']}</b> khả dụng / {s['total']} tổng</blockquote>"
     if errs:
         txt += "\n\n<b>⚠️ Lỗi:</b>\n" + "\n".join(f"• {html.escape(e)}" for e in errs[:15])
-    main_bot.reply_to(m, txt, reply_markup=back_markup("adm_panel"))
+    main_bot.reply_to(m, txt, reply_markup=back_markup("adm_proxy"))
 
-# ================================ ADMIN COMMANDS ================================
+@main_bot.message_handler(
+    func=lambda m: m.from_user is not None and m.from_user.id == ADMIN_ID
+    and (user_states.get(m.from_user.id) or "").startswith("ADMIN_EDIT_PRODUCT|")
+    and bool(m.text) and not m.text.startswith("/")
+)
+def admin_edit_product_input(m):
+    state = user_states.get(m.from_user.id, "")
+    try:
+        _, pid_s, field = state.split("|")
+        pid = int(pid_s)
+    except Exception:
+        user_states.pop(m.from_user.id, None); return
+    raw = m.text.strip()
+    if field == "price":
+        try: value = int(re.sub(r"[^\d]", "", raw))
+        except Exception:
+            main_bot.reply_to(m, "❌ Giá không hợp lệ. Nhập số nguyên, vd: 50000"); return
+    elif field == "stock":
+        try: value = int(raw)
+        except Exception:
+            main_bot.reply_to(m, "❌ Tồn kho phải là số (-1 = vô hạn)"); return
+    else:
+        value = raw
+    product_update_field(pid, field, value)
+    user_states.pop(m.from_user.id, None)
+    field_vn = {"name": "Tên", "price": "Giá", "description": "Mô tả",
+                "category": "Danh mục", "stock": "Tồn kho",
+                "delivery_data": "Nội dung"}.get(field, field)
+    main_bot.reply_to(m,
+        f"✅ Đã cập nhật <b>{field_vn}</b> cho sản phẩm #{pid}.",
+        reply_markup=types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("👁️ Xem lại sản phẩm",
+                callback_data=f"adm_prod_view|{pid}"),
+            types.InlineKeyboardButton("🔙 DS sản phẩm",
+                callback_data="adm_products")))
+
+@main_bot.message_handler(
+    func=lambda m: m.from_user is not None and m.from_user.id == ADMIN_ID
+    and (user_states.get(m.from_user.id) or "").startswith("ADMIN_EDIT_SETTING|")
+    and bool(m.text) and not m.text.startswith("/")
+)
+def admin_edit_setting_input(m):
+    state = user_states.get(m.from_user.id, "")
+    try:
+        key = state.split("|", 1)[1]
+    except Exception:
+        user_states.pop(m.from_user.id, None); return
+    value = m.text.strip()
+    setting_set(key, value)
+    user_states.pop(m.from_user.id, None)
+    main_bot.reply_to(m,
+        f"✅ Đã cập nhật giao diện <b>{key}</b>.\n\n👉 Bấm /menu để xem thay đổi.",
+        reply_markup=types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("🎨 Về giao diện", callback_data="adm_ui"),
+            types.InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_panel")))
+
+# ══════════════════════════ ADMIN COMMANDS ══════════════════════════
 @main_bot.message_handler(commands=["addmoney","stats","broadcast","testtiktok","lastwebhook",
                                      "shopstats","addproduct","delproduct","listproducts",
                                      "importproxy","proxystock","clearexpiredproxy","admin"])
@@ -1244,7 +1758,7 @@ def admin_commands(m):
         main_bot.reply_to(m, f"✅ Đã cập nhật số dư <code>{uid}</code>.\n"
                              f"Số dư mới: <b>{fmt(u['balance'])}đ</b>")
         try:
-            main_bot.send_message(uid, f"<b>💰 Admin vừa cập nhật số dư của bạn!</b>\n"
+            main_bot.send_message(uid, f"<b>💰 Admin vừa cập nhật số dư!</b>\n"
                                        f"🏦 Hiện có: <b>{fmt(u['balance'])}đ</b>")
         except Exception: pass
 
@@ -1261,13 +1775,13 @@ def admin_commands(m):
     elif cmd == "/testtiktok":
         if len(parts) < 2:
             main_bot.reply_to(m, "Cú pháp: <code>/testtiktok &lt;link&gt;</code>"); return
-        data = tikwm_fetch(parts[1].strip())
-        if not data:
-            main_bot.reply_to(m, f"❌ tikwm lỗi:\n<code>{html.escape(last_tikwm_error)}</code>"); return
-        link = abs_url(data.get("hdplay") or data.get("play"))
+        data = snaptik_client.fetch(parts[1].strip())
+        if not data or not data.get("hdplay"):
+            main_bot.reply_to(m, "❌ Snaptik không trả dữ liệu."); return
+        link = data["hdplay"]
         f = download_file(link, "test.mp4") if link else None
         if f: main_bot.reply_to(m, f"✅ OK ({f.getbuffer().nbytes//1024} KB)")
-        else: main_bot.reply_to(m, f"⚠️ tikwm OK, tải file lỗi\nLink: <code>{html.escape((link or '')[:150])}</code>")
+        else: main_bot.reply_to(m, f"⚠️ Snaptik OK, tải file lỗi\nLink: <code>{html.escape((link or '')[:150])}</code>")
 
     elif cmd == "/lastwebhook":
         body = html.escape("\n".join(webhook_log))
@@ -1306,15 +1820,18 @@ def admin_commands(m):
             main_bot.reply_to(m, "Chưa có sản phẩm nào."); return
         txt = "<b>📦 DANH SÁCH SẢN PHẨM</b>\n\n"
         for p in prods:
-            txt += f"<code>{p['id']:>3}</code> | {html.escape(p['name'][:40])} | {fmt(p['price'])}đ | {p['category']}\n"
+            icon = "✅" if p.get("active", 1) else "⛔"
+            txt += f"{icon} <code>{p['id']:>3}</code> | {html.escape(p['name'][:40])} | {fmt(p['price'])}đ | {p['category']}\n"
         main_bot.reply_to(m, txt)
 
     elif cmd == "/delproduct":
         try: pid = int(parts[1])
         except Exception:
             main_bot.reply_to(m, "Cú pháp: <code>/delproduct &lt;id&gt;</code>"); return
-        with db() as c: c.execute("DELETE FROM products WHERE id=?", (pid,))
-        main_bot.reply_to(m, f"✅ Đã xóa sản phẩm #{pid}")
+        p = shop_get(pid)
+        product_delete(pid)
+        main_bot.reply_to(m, f"✅ Đã xóa sản phẩm #{pid}" +
+                         (f": {html.escape(p['name'])}" if p else ""))
 
     elif cmd == "/addproduct":
         if len(parts) < 3:
@@ -1324,7 +1841,7 @@ def admin_commands(m):
                 "• <code>text</code>: nội dung text (dùng \\n xuống dòng)\n"
                 "• <code>link</code>: URL\n"
                 "• <code>file</code>: file_id (gửi file trước cho bot)\n"
-                "• <code>proxy</code>: data = số ngày (v.d: 30)\n\n"
+                "• <code>proxy</code>: data = số ngày (vd: 30)\n\n"
                 "<b>Ví dụ:</b>\n"
                 "<code>/addproduct VPN 1 tháng | 50000 | VPN | text | User: abc\\nPass: 123 | VPN tốc độ cao</code>")
             return
@@ -1352,8 +1869,7 @@ def admin_commands(m):
             "Gửi danh sách proxy (mỗi dòng 1 proxy):\n"
             "<code>ip:port:user:pass | region | isp | protocol</code>\n\n"
             "<b>Ví dụ:</b>\n"
-            "<code>113.22.55.10:8080:user1:pass123 | Hà Nội | Viettel | HTTP</code>\n"
-            "<code>27.72.99.5:3128:user2:pass456 | HCM | Vinaphone | SOCKS5</code>\n\n"
+            "<code>113.22.55.10:8080:user1:pass123 | Hà Nội | Viettel | HTTP</code>\n\n"
             "Gõ /cancel để hủy.")
 
     elif cmd == "/proxystock":
@@ -1373,7 +1889,7 @@ def admin_commands(m):
             n = cur.rowcount
         main_bot.reply_to(m, f"✅ Đã xóa <b>{n}</b> proxy hết hạn.")
 
-# ================================ FALLBACK ================================
+# ══════════════════════════ FALLBACK ══════════════════════════
 @main_bot.message_handler(content_types=["document","photo","video","audio"])
 def catch_media(m):
     if m.from_user and m.from_user.id == ADMIN_ID:
@@ -1402,7 +1918,7 @@ def chat_or_fallback(m):
         log.exception("Chat AI bot chính lỗi: %s", e)
         main_bot.reply_to(m, "🤖 Bot đang bận, thử lại sau nhé!")
 
-# ================================ SEPAY WEBHOOK ================================
+# ══════════════════════════ SEPAY WEBHOOK ══════════════════════════
 def wh_note(status, detail=""):
     line = f"{datetime.now():%H:%M:%S} [{status}] {detail}"[:220]
     webhook_log.appendleft(line)
@@ -1478,7 +1994,7 @@ def home(): return "Bot Server Active", 200
 @app.route("/health")
 def health(): return "ok", 200
 
-# ================================ KEEP ALIVE ================================
+# ══════════════════════════ KEEP ALIVE ══════════════════════════
 def keep_alive():
     url = env("RENDER_EXTERNAL_URL") or ("https://" + env("RENDER_EXTERNAL_HOSTNAME") if env("RENDER_EXTERNAL_HOSTNAME") else "")
     if not url:
