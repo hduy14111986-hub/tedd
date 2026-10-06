@@ -1130,16 +1130,50 @@ def home(): return "Bot Server Active", 200
 def health(): return "ok", 200
 
 # ================================ START ================================
+# ================================ CHỐNG NGỦ ĐÔNG ================================
 def keep_alive():
+    """
+    Tự ping chính mình qua URL công khai của Render để không bị ngủ đông.
+    Render cho service ngủ sau 15 phút không có traffic → ping mỗi 5 phút.
+    """
     url = env("RENDER_EXTERNAL_URL")
     if not url:
-        log.warning("RENDER_EXTERNAL_URL trống → bot sẽ ngủ sau 15 phút. "
-                    "Set biến này hoặc dùng cron-job.org ping /health mỗi 5 phút!")
+        # Fallback: thử dò URL từ biến khác hoặc tên service
+        url = env("RENDER_EXTERNAL_HOSTNAME")
+        if url:
+            url = "https://" + url
+    if not url:
+        log.warning("⚠️ Không có RENDER_EXTERNAL_URL → keep_alive TẮT. "
+                    "Nếu chạy local thì bỏ qua, nếu chạy Render phải có biến này!")
         return
+
+    ping_url = url.rstrip("/") + "/health"
+    log.info("🔄 Keep-alive bật → ping %s mỗi 5 phút", ping_url)
+
+    # Đếm số lần thành công/lỗi để biết tình trạng
+    stats = {"ok": 0, "fail": 0, "last_ok": None}
+
+    # Ping ngay lập tức lần đầu (không chờ 5 phút)
+    time.sleep(30)
+
     while True:
-        time.sleep(540)
-        try: requests.get(url.rstrip("/") + "/health", timeout=10)
-        except Exception as e: log.warning("keep_alive: %s", e)
+        try:
+            r = requests.get(ping_url, timeout=15,
+                             headers={"User-Agent": "RenderKeepAlive/1.0"})
+            if r.status_code == 200:
+                stats["ok"] += 1
+                stats["last_ok"] = datetime.now().strftime("%H:%M:%S")
+                # Chỉ log mỗi 12 lần (1 giờ) để không spam log
+                if stats["ok"] % 12 == 1:
+                    log.info("💓 Keep-alive OK (lần %d) | %s", stats["ok"], stats["last_ok"])
+            else:
+                stats["fail"] += 1
+                log.warning("⚠️ Keep-alive HTTP %s (lần lỗi %d)", r.status_code, stats["fail"])
+        except Exception as e:
+            stats["fail"] += 1
+            log.warning("⚠️ Keep-alive lỗi (lần %d): %s", stats["fail"], e)
+
+        time.sleep(300)  # 5 phút = 300 giây
 
 def run_main_polling():
     while True:
