@@ -84,26 +84,61 @@ def safe_edit(bot, chat_id, mid, text):
         pass
 
 
-def tikwm_info(url, retries=3):
-    """Gọi API tikwm, trả về dict `data` hoặc None.
-    API miễn phí giới hạn ~1 request/giây nên có khóa + chờ + thử lại."""
+tik_last_error = [""]
+TIKWM_HOSTS = ["https://www.tikwm.com", "https://tikwm.com"]
+
+
+def _resolve_tiktok_url(url):
+    """Đổi link rút gọn (vt./vm.tiktok.com) thành link đầy đủ có /video/<id>."""
+    try:
+        if re.search(r"//(vt|vm)\.tiktok\.com/", url) or "/t/" in url:
+            r = requests.get(url, headers=UA, allow_redirects=True, timeout=15, proxies=PROXIES)
+            final = r.url or ""
+            if "tiktok.com" in final and ("/video/" in final or "/photo/" in final):
+                return final.split("?")[0]
+    except Exception as e:
+        log.warning("Giải link rút gọn lỗi: %s", e)
+    return url
+
+
+def tikwm_info(url, retries=2):
+    """Gọi API tikwm, trả về dict `data` hoặc None. Lý do lỗi lưu trong tik_last_error."""
+    full = _resolve_tiktok_url(url)
+    targets = [full] + ([url] if url != full else [])
+    tik_last_error[0] = ""
     for _ in range(retries):
-        j = {}
-        with tik_lock:
-            wait = 1.2 - (time.time() - _last_tikwm[0])
-            if wait > 0:
-                time.sleep(wait)
-            _last_tikwm[0] = time.time()
-            try:
-                r = requests.post(TIKWM_API, data={"url": url, "hd": 1},
-                                  headers={**UA, "Referer": TIKWM_HOST + "/"},
-                                  timeout=25, proxies=PROXIES)
-                j = r.json()
-            except Exception as e:
-                log.warning("tikwm lỗi mạng/JSON: %s", e)
-        if j.get("code") == 0 and j.get("data"):
-            return j["data"]
-        log.warning("tikwm trả về: %s", j.get("msg") or j)
+        for target in targets:
+            for host in TIKWM_HOSTS:
+                for method in ("post", "get"):
+                    j = {}
+                    with tik_lock:
+                        wait = 1.2 - (time.time() - _last_tikwm[0])
+                        if wait > 0:
+                            time.sleep(wait)
+                        _last_tikwm[0] = time.time()
+                        try:
+                            hdr = {**UA, "Referer": host + "/"}
+                            if method == "post":
+                                r = requests.post(host + "/api/", data={"url": target, "hd": 1},
+                                                  headers=hdr, timeout=25, proxies=PROXIES)
+                            else:
+                                r = requests.get(host + "/api/", params={"url": target, "hd": 1},
+                                                 headers=hdr, timeout=25, proxies=PROXIES)
+                            try:
+                                j = r.json()
+                            except Exception:
+                                tik_last_error[0] = "HTTP %s, không phải JSON: %s" % (
+                                    r.status_code, (r.text or "")[:100].replace("\n", " "))
+                                continue
+                        except Exception as e:
+                            tik_last_error[0] = "Lỗi mạng: %s" % str(e)[:120]
+                            continue
+                    if j.get("code") == 0 and j.get("data"):
+                        return j["data"]
+                    tik_last_error[0] = "tikwm: %s" % (j.get("msg") or j)
+                    log.warning("tikwm [%s %s] %s", host, method, tik_last_error[0])
+                    if "limit" in str(j.get("msg", "")).lower():
+                        time.sleep(2)
         time.sleep(1.5)
     return None
 
@@ -111,8 +146,11 @@ def tikwm_info(url, retries=3):
 def deliver_tiktok(bot, chat_id, url):
     data = tikwm_info(url)
     if not data:
-        return False, ("❌ Không tải được. Video phải công khai, link đúng dạng TikTok. "
-                       "Thử lại sau ít phút nhé!")
+        msg = ("❌ Không tải được. Video phải công khai, link đúng dạng TikTok. "
+               "Thử lại sau ít phút nhé!")
+        if chat_id == ADMIN_ID:
+            msg += "\n\n🛠 Chi tiết (chỉ admin thấy): " + html.escape(tik_last_error[0] or "không rõ")
+        return False, msg
 
     vid = str(data.get("id") or "")
     minfo = data.get("music_info") or {}
@@ -734,6 +772,7 @@ s, n7 = re.subn(r"^([ \t]*)v = snaptik_fetch\((.+)\)[ \t]*$",
                 r"\1_d = tikwm_info(\2)\n\1v = _abs(_d.get('play')) if _d else ''", s, flags=re.M)
 if n7:
     log.append("+ Đã sửa /testtiktok dùng tikwm")
+    s = s.replace('if v else "❌ Lỗi")', 'if v else "❌ Lỗi: " + html.escape(tik_last_error[0] or "không rõ"))')
 if "snaptik_fetch(" in s:
     log.append("! Vẫn còn chỗ gọi snaptik_fetch(), hãy thay bằng tikwm_info()")
 
