@@ -1,24 +1,20 @@
 # -*- coding: utf-8 -*-
-"""BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con thuê (DB riêng) + Buff SMM"""
-import os, re, time, html, hmac, base64, sqlite3, logging, threading, urllib.parse
+"""BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con thuê + Buff SMM"""
+import os, re, time, html, hmac, sqlite3, logging, threading, urllib.parse
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-
 import requests, telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
 from flask import Flask, request, jsonify
-
 try:
     from google import genai
     from google.genai import types as gtypes
 except Exception:
     genai = None; gtypes = None
-
 import smm
 
-# ══════════════ CONFIG ══════════════
 def env(k, d=""): return os.environ.get(k, d).strip()
 
 BOT_TOKEN      = env("BOT_TOKEN") or exit("❌ Thiếu BOT_TOKEN")
@@ -46,14 +42,12 @@ BACKUP_KEEP    = 5
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BOTS_DIR, exist_ok=True)
 
-# Migration DB cũ nếu có
 _old = os.path.join(DATA_DIR, "bot_database.db")
 if os.path.exists(_old) and not os.path.exists(MAIN_DB):
     try:
         os.rename(_old, MAIN_DB)
         for e in ("-wal", "-shm"):
             if os.path.exists(_old + e): os.rename(_old + e, MAIN_DB + e)
-        log_msg = "Migration: bot_database.db → main.db"
     except Exception: pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -67,17 +61,11 @@ if genai and GEMINI_API_KEY:
     try: ai_client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e: log.warning("Gemini init: %s", e)
 
-# ══════════════ CONTEXT (multi-bot) ══════════════
 _ctx = threading.local()
-child_bot_meta = {}
-active_child_bots = {}
+child_bot_meta = {}; active_child_bots = {}
 locks = {"child": threading.Lock(), "proxy": threading.Lock(), "backup": threading.Lock()}
-user_states = {}
-ai_last_call = {}
-ai_hist_lock = threading.Lock()
-ai_history = {}
-_ai_model_ok = [None]
-webhook_log = deque(maxlen=30)
+user_states = {}; ai_last_call = {}; ai_hist_lock = threading.Lock(); ai_history = {}
+_ai_model_ok = [None]; webhook_log = deque(maxlen=30)
 
 def cur_db():      return getattr(_ctx, "db_path", MAIN_DB)
 def cur_admin():   return getattr(_ctx, "admin_id", ADMIN_ID)
@@ -85,7 +73,6 @@ def cur_bot():     return getattr(_ctx, "bot_instance", None) or main_bot
 def cur_botname(): return getattr(_ctx, "bot_username", BOT_USERNAME)
 def is_child():    return getattr(_ctx, "is_child", False)
 
-# ══════════════ DB ══════════════
 @contextmanager
 def db():
     conn = sqlite3.connect(cur_db(), timeout=30)
@@ -120,33 +107,25 @@ CREATE TABLE IF NOT EXISTS ipa_files (id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '');
 """
-
 MAIN_ONLY = """
 CREATE TABLE IF NOT EXISTS user_bots (id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER, bot_token TEXT UNIQUE, bot_username TEXT,
   status TEXT DEFAULT 'active', expires_at TEXT DEFAULT '',
   plan TEXT DEFAULT 'basic', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 """
-
 DEFAULT_SETTINGS = {
-    "home_title":    "🚀 HỆ THỐNG BOT ĐA NĂNG",
+    "home_title": "🚀 HỆ THỐNG BOT ĐA NĂNG",
     "home_subtitle": "Data 4G • Proxy • IPA • AI • Buff SMM",
-    "welcome_msg":   "Chào mừng bạn! Nhắn tin bất kỳ để chat với AI.",
-    "shop_title":    "🛒 CỬA HÀNG",
-    "support_text":  "Nhắn admin để được hỗ trợ nhanh nhất!",
-    "footer_note":   "Cảm ơn bạn đã sử dụng dịch vụ! ❤️",
-    "bank_name":     "",
-    "account_no":    "",
-    "account_name":  "",
+    "welcome_msg": "Chào mừng bạn! Nhắn tin bất kỳ để chat với AI.",
+    "shop_title": "🛒 CỬA HÀNG",
+    "support_text": "Nhắn admin để được hỗ trợ nhanh nhất!",
+    "footer_note": "Cảm ơn bạn đã sử dụng dịch vụ! ❤️",
+    "bank_name": "", "account_no": "", "account_name": "",
 }
-
 DEFAULT_PRODUCTS = [
-    ("🌐 Data 30K – Không giới hạn", 30000, "Data",
-     "Gói KHÔNG GIỚI HẠN data 30 ngày. Dùng mọi nhà mạng: Viettel, Vina, Mobi, Vietnamobile. 4G/5G."),
-    ("🌐 Data 50K – Không giới hạn", 50000, "Data",
-     "Gói KHÔNG GIỚI HẠN data 30 ngày. Dùng mọi nhà mạng: Viettel, Vina, Mobi, Vietnamobile. 4G/5G."),
-    ("🌐 Proxy dân cư VN 30 ngày", 50000, "Proxy",
-     "Proxy dân cư Việt Nam, không giới hạn băng thông. Dùng 30 ngày."),
+    ("🌐 Data 30K – Không giới hạn", 30000, "Data", "Gói KHÔNG GIỚI HẠN data 30 ngày. Mọi nhà mạng. 4G/5G."),
+    ("🌐 Data 50K – Không giới hạn", 50000, "Data", "Gói KHÔNG GIỚI HẠN data 30 ngày. Mọi nhà mạng. 4G/5G."),
+    ("🌐 Proxy dân cư VN 30 ngày", 50000, "Proxy", "Proxy dân cư Việt Nam, không giới hạn băng thông. Dùng 30 ngày."),
 ]
 
 def init_db(path=None, is_main=False):
@@ -163,22 +142,17 @@ def init_db(path=None, is_main=False):
             c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (k, v))
         if c.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
             for n, p, cat, desc in DEFAULT_PRODUCTS:
-                c.execute("INSERT INTO products (name,description,price,category) VALUES (?,?,?,?)",
-                          (n, desc, p, cat))
+                c.execute("INSERT INTO products (name,description,price,category) VALUES (?,?,?,?)", (n, desc, p, cat))
         c.commit()
     finally: c.close()
     try: smm.init_schema(path)
     except Exception as e: log.warning("smm init: %s", e)
 
-# ══════════════ USER ══════════════
 def get_or_create_user(uid, username, full_name):
     with db() as c:
-        c.execute("INSERT OR IGNORE INTO users (user_id,username,full_name) VALUES (?,?,?)",
-                  (uid, username, full_name))
-        c.execute("UPDATE users SET username=?, full_name=? WHERE user_id=?",
-                  (username, full_name, uid))
-        row = c.execute("SELECT balance,total_recharged,month_recharged,month_key FROM users WHERE user_id=?",
-                        (uid,)).fetchone()
+        c.execute("INSERT OR IGNORE INTO users (user_id,username,full_name) VALUES (?,?,?)", (uid, username, full_name))
+        c.execute("UPDATE users SET username=?, full_name=? WHERE user_id=?", (username, full_name, uid))
+        row = c.execute("SELECT balance,total_recharged,month_recharged,month_key FROM users WHERE user_id=?", (uid,)).fetchone()
     month = row[2] if row[3] == cur_month() else 0
     return {"id": uid, "balance": row[0], "total": row[1], "month": month}
 
@@ -197,41 +171,30 @@ def admin_add_money(uid, amt):
 
 def process_deposit(tx_id, uid, amt):
     with db() as c:
-        cur = c.execute("INSERT OR IGNORE INTO transactions (tx_id,user_id,amount,kind) VALUES (?,?,?,'deposit')",
-                        (tx_id, uid, amt))
-        if cur.rowcount == 0: return False
+        if c.execute("INSERT OR IGNORE INTO transactions (tx_id,user_id,amount,kind) VALUES (?,?,?,'deposit')",
+                     (tx_id, uid, amt)).rowcount == 0: return False
         c.execute("INSERT OR IGNORE INTO users (user_id,username,full_name) VALUES (?,'','')", (uid,))
         _credit(c, uid, amt)
-    schedule_backup()
-    return True
+    schedule_backup(); return True
 
 def process_donation(tx_id, uid, amt):
     with db() as c:
         return c.execute("INSERT OR IGNORE INTO transactions (tx_id,user_id,amount,kind) VALUES (?,?,?,'donate')",
                          (tx_id, uid, amt)).rowcount > 0
 
-# ══════════════ SETTINGS ══════════════
 def setting_get(k, d=""):
     with db() as c:
         r = c.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
     return r[0] if r and r[0] else d
-
 def setting_set(k, v):
     with db() as c: c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (k, v))
-
 def setting_all():
     with db() as c: return dict(c.execute("SELECT key,value FROM settings").fetchall())
-
 def fmt(n): return f"{int(n):,}".replace(",", ".")
-
 def bank_info():
-    if is_child():
-        return (setting_get("bank_name") or "—",
-                setting_get("account_no") or "—",
-                setting_get("account_name") or "—")
+    if is_child(): return (setting_get("bank_name") or "—", setting_get("account_no") or "—", setting_get("account_name") or "—")
     return (BANK_NAME, ACCOUNT_NO, ACCOUNT_NAME)
 
-# ══════════════ SHOP ══════════════
 def shop_list(only_active=True, limit=50):
     with db() as c:
         q = "SELECT id,name,price,category,stock,sold,active FROM products WHERE 1=1"
@@ -242,14 +205,12 @@ def shop_list(only_active=True, limit=50):
 
 def shop_list_all(limit=200):
     with db() as c:
-        rows = c.execute("SELECT id,name,price,category,stock,sold,active FROM products ORDER BY id LIMIT ?",
-                         (limit,)).fetchall()
+        rows = c.execute("SELECT id,name,price,category,stock,sold,active FROM products ORDER BY id LIMIT ?", (limit,)).fetchall()
     return [dict(zip(["id","name","price","category","stock","sold","active"], r)) for r in rows]
 
 def shop_get(pid):
     with db() as c:
-        r = c.execute("SELECT id,name,description,price,category,stock,sold,active FROM products WHERE id=?",
-                      (pid,)).fetchone()
+        r = c.execute("SELECT id,name,description,price,category,stock,sold,active FROM products WHERE id=?", (pid,)).fetchone()
     if not r: return None
     return dict(zip(["id","name","description","price","category","stock","sold","active"], r))
 
@@ -260,23 +221,19 @@ def shop_buy(uid, pid):
         name, price, stock, active = r
         if not active: return False, "SP đã ngừng bán"
         if stock == 0: return False, "SP đã hết hàng"
-        cur = c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
-                        (price, uid, price))
+        cur = c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?", (price, uid, price))
         if cur.rowcount == 0: return False, "Số dư không đủ"
         if stock > 0: c.execute("UPDATE products SET stock=stock-1, sold=sold+1 WHERE id=?", (pid,))
         else: c.execute("UPDATE products SET sold=sold+1 WHERE id=?", (pid,))
-        c.execute("INSERT INTO orders (user_id,product_id,product_name,price) VALUES (?,?,?,?)",
-                  (uid, pid, name, price))
+        c.execute("INSERT INTO orders (user_id,product_id,product_name,price) VALUES (?,?,?,?)", (uid, pid, name, price))
         oid = c.lastrowid
     schedule_backup()
     return True, {"order_id": oid, "name": name, "price": price}
 
 def shop_myorders(uid, limit=10):
     with db() as c:
-        return c.execute("SELECT id,product_name,price,created_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT ?",
-                         (uid, limit)).fetchall()
+        return c.execute("SELECT id,product_name,price,created_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit)).fetchall()
 
-# ══════════════ PROXY ══════════════
 def proxy_import(lines):
     added, errs = 0, []
     with db() as c:
@@ -317,9 +274,9 @@ def proxy_buy(uid, product_id, days=30):
             if not active: return False, "SP ngừng bán", None
             if c.execute("SELECT COUNT(*) FROM proxy_stock WHERE status='available'").fetchone()[0] <= 0:
                 return False, "Kho proxy hết!", None
-            cur = c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
-                            (price, uid, price))
-            if cur.rowcount == 0: return False, "Số dư không đủ", None
+            if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
+                         (price, uid, price)).rowcount == 0:
+                return False, "Số dư không đủ", None
             row = c.execute("SELECT id,ip,port,username,password,protocol,region,isp FROM proxy_stock WHERE status='available' ORDER BY id LIMIT 1").fetchone()
             if not row:
                 c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (price, uid))
@@ -337,39 +294,30 @@ def proxy_buy(uid, product_id, days=30):
 
 def proxy_my(uid):
     with db() as c:
-        rows = c.execute("SELECT id,ip,port,username,password,protocol,region,isp,expires_at FROM proxy_stock WHERE sold_to=? ORDER BY id DESC",
-                         (uid,)).fetchall()
+        rows = c.execute("SELECT id,ip,port,username,password,protocol,region,isp,expires_at FROM proxy_stock WHERE sold_to=? ORDER BY id DESC", (uid,)).fetchall()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return [{"id": r[0], "ip": r[1], "port": r[2], "username": r[3], "password": r[4],
              "protocol": r[5], "region": r[6], "isp": r[7], "expires_at": r[8],
              "status": "active" if r[8] and r[8] > now else "expired"} for r in rows]
 
-# ══════════════ IPA ══════════════
 def ipa_add(name, desc, file_id, size=0):
     with db() as c:
         return c.execute("INSERT INTO ipa_files (name,description,file_id,file_size) VALUES (?,?,?,?)",
                          (name, desc, file_id, size)).lastrowid
-
 def ipa_list(limit=100):
     with db() as c:
-        rows = c.execute("SELECT id,name,description,file_size,downloads FROM ipa_files ORDER BY id DESC LIMIT ?",
-                         (limit,)).fetchall()
+        rows = c.execute("SELECT id,name,description,file_size,downloads FROM ipa_files ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [dict(zip(["id","name","description","file_size","downloads"], r)) for r in rows]
-
 def ipa_get(pid):
     with db() as c:
-        r = c.execute("SELECT id,name,description,file_id,file_size,downloads FROM ipa_files WHERE id=?",
-                      (pid,)).fetchone()
+        r = c.execute("SELECT id,name,description,file_id,file_size,downloads FROM ipa_files WHERE id=?", (pid,)).fetchone()
     if not r: return None
     return dict(zip(["id","name","description","file_id","file_size","downloads"], r))
-
 def ipa_delete(pid):
     with db() as c: c.execute("DELETE FROM ipa_files WHERE id=?", (pid,))
-
 def ipa_inc(pid):
     with db() as c: c.execute("UPDATE ipa_files SET downloads=downloads+1 WHERE id=?", (pid,))
 
-# ══════════════ BOT CON (MAIN DB) ══════════════
 def save_user_bot(uid, token, uname, days=None):
     days = days or BOT_RENT_DAYS
     exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -397,8 +345,7 @@ def renew_bot(uid, token, days=None):
 
 def list_user_bots(uid):
     with sqlite3.connect(MAIN_DB) as c:
-        rows = c.execute("SELECT id,bot_token,bot_username,status,expires_at,plan FROM user_bots WHERE user_id=? ORDER BY id DESC",
-                         (uid,)).fetchall()
+        rows = c.execute("SELECT id,bot_token,bot_username,status,expires_at,plan FROM user_bots WHERE user_id=? ORDER BY id DESC", (uid,)).fetchall()
     now = datetime.now(); out = []
     for r in rows:
         dl = None
@@ -423,7 +370,6 @@ def token_exists(t):
     with sqlite3.connect(MAIN_DB) as c:
         return c.execute("SELECT 1 FROM user_bots WHERE bot_token=?", (t,)).fetchone() is not None
 
-# ══════════════ CHILD BOT ══════════════
 def child_db_path(token):
     prefix = re.sub(r"[^A-Za-z0-9]", "", token.split(":")[0])[:12]
     return os.path.join(BOTS_DIR, f"bot_{prefix}.db")
@@ -439,11 +385,8 @@ def make_child_bot(token, owner_id):
 
     @bot.middleware_handler(update_types=["message", "callback_query"])
     def _mw(b, update):
-        _ctx.db_path = db_path
-        _ctx.admin_id = owner_id
-        _ctx.is_child = True
-        _ctx.bot_instance = b
-        _ctx.bot_username = "@" + me.username
+        _ctx.db_path = db_path; _ctx.admin_id = owner_id
+        _ctx.is_child = True; _ctx.bot_instance = b; _ctx.bot_username = "@" + me.username
 
     register_all_handlers(bot)
     return bot
@@ -512,8 +455,7 @@ def check_expired_bots():
         if tk in active_child_bots:
             stop_child_bot(tk)
             with sqlite3.connect(MAIN_DB) as c:
-                c.execute("UPDATE user_bots SET status='inactive' WHERE bot_token=?", (tk,))
-                c.commit()
+                c.execute("UPDATE user_bots SET status='inactive' WHERE bot_token=?", (tk,)); c.commit()
             try:
                 main_bot.send_message(uid,
                     f"⏰ <b>BOT HẾT HẠN</b>\n\n🤖 @{uname}\n📅 Hạn: <b>{exp}</b>\n\n"
@@ -529,10 +471,7 @@ def bot_checker_loop():
         except Exception as e: log.warning("checker: %s", e)
         time.sleep(3600)
 
-# ══════════════ BACKUP ══════════════
-backup_ids = []
-_backup_timer = [None]
-_backup_timer_lock = threading.Lock()
+backup_ids = []; _backup_timer = [None]; _backup_timer_lock = threading.Lock()
 
 def _snapshot(src, dst):
     s = sqlite3.connect(src, timeout=30)
@@ -568,11 +507,11 @@ def backup_upload():
             except: pass
             backup_ids.append(msg.message_id)
             while len(backup_ids) > BACKUP_KEEP:
-                old = backup_ids.pop(0)
-                try: main_bot.delete_message(BACKUP_CHAT_ID, old)
-                except: pass
+                try: main_bot.delete_message(BACKUP_CHAT_ID, backup_ids.pop(0))
+                except: backup_ids.pop(0)
             log.info("Backup OK %d KB", sz); return True
-        except Exception as e: log.warning("Backup: %s", e); return False
+        except Exception as e:
+            log.warning("Backup: %s", e); return False
         finally:
             try: os.remove(tmp)
             except: pass
@@ -612,10 +551,8 @@ def backup_loop():
         except Exception as e: log.warning("backup: %s", e)
         time.sleep(BACKUP_INTERVAL)
 
-# ══════════════ AI ══════════════
 AI_HISTORY_TURNS = 8
 AI_SEARCH = env("AI_SEARCH", "1") != "0"
-
 BASE_PERSONA = (
     "Bạn là trợ lý AI của cửa hàng, đồng thời là trợ lý đa năng.\n"
     "NGUYÊN TẮC:\n"
@@ -655,8 +592,7 @@ def _persona_text():
 def md_to_tg_html(t):
     stash = []
     def keep(s): stash.append(s); return f"\x00{len(stash)-1}\x00"
-    t = re.sub(r"```[^\n`]*\n?(.*?)```",
-               lambda m: keep("<pre>" + html.escape(m.group(1).strip("\n")) + "</pre>"), t, flags=re.S)
+    t = re.sub(r"```[^\n`]*\n?(.*?)```", lambda m: keep("<pre>" + html.escape(m.group(1).strip("\n")) + "</pre>"), t, flags=re.S)
     t = re.sub(r"`([^`\n]+)`", lambda m: keep("<code>" + html.escape(m.group(1)) + "</code>"), t)
     t = html.escape(t)
     t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=re.S)
@@ -692,23 +628,20 @@ def ask_gemini(text, key=None):
             try:
                 kw = dict(system_instruction=system, temperature=0.7, max_output_tokens=2048)
                 if use_search: kw["tools"] = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
-                r = ai_client.models.generate_content(
-                    model=model, contents=contents, config=gtypes.GenerateContentConfig(**kw))
+                r = ai_client.models.generate_content(model=model, contents=contents,
+                    config=gtypes.GenerateContentConfig(**kw))
                 ans = (r.text or "").strip()
                 if not ans: last_err = "empty"; continue
                 if key is not None:
                     with ai_hist_lock:
                         if len(ai_history) > 5000: ai_history.clear()
                         dq = ai_history.setdefault(key, deque(maxlen=AI_HISTORY_TURNS * 2))
-                        dq.append(("user", text[:2000]))
-                        dq.append(("model", ans[:3000]))
+                        dq.append(("user", text[:2000])); dq.append(("model", ans[:3000]))
                 _ai_model_ok[0] = model
                 return ans
             except Exception as e:
-                last_err = str(e)
-                low = last_err.lower()
-                if use_search and ("tool" in low or "search" in low or "grounding" in low):
-                    continue
+                last_err = str(e); low = last_err.lower()
+                if use_search and ("tool" in low or "search" in low or "grounding" in low): continue
                 break
     low = last_err.lower()
     if "api key not valid" in low or "api_key_invalid" in low: return "❌ API key không hợp lệ!"
@@ -722,8 +655,7 @@ def reply_ai(bot, m):
     text = (m.text or "").strip()
     if len(text) < 2:
         bot.reply_to(m, "Bạn muốn hỏi gì cụ thể hơn không? 😊"); return
-    now = time.time()
-    key = (id(bot), uid)
+    now = time.time(); key = (id(bot), uid)
     if now - ai_last_call.get(key, 0) < AI_COOLDOWN:
         bot.reply_to(m, f"⏳ Đợi {AI_COOLDOWN} giây nhé!"); return
     ai_last_call[key] = now
@@ -742,7 +674,6 @@ def reply_ai(bot, m):
                 else: bot.send_message(m.chat.id, part, parse_mode="")
             except: pass
 
-# ══════════════ UI HELPERS ══════════════
 def back_markup(cb="menu_back"):
     return types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data=cb))
 
@@ -767,10 +698,9 @@ def main_menu(uid=None):
     return m
 
 def home_text(u, is_admin=False):
-    title  = setting_get("home_title"); sub = setting_get("home_subtitle"); foot = setting_get("footer_note")
-    bn = cur_botname()
+    title = setting_get("home_title"); sub = setting_get("home_subtitle"); foot = setting_get("footer_note")
     base = (f"<b>{html.escape(title)}</b>\n<i>{html.escape(sub)}</i>\n\n<blockquote>"
-            f"🤖 <b>Bot:</b> {bn}\n"
+            f"🤖 <b>Bot:</b> {cur_botname()}\n"
             "━━━━━━━━━━━━━━━\n"
             f"🏆 <b>Tổng nạp:</b> {fmt(u['total'])}đ\n"
             f"💰 <b>Tháng này:</b> {fmt(u['month'])}đ\n"
@@ -781,16 +711,14 @@ def home_text(u, is_admin=False):
             "• 🔥 Buff tim/flow TikTok, Facebook...\n"
             "• 📱 Tải IPA miễn phí\n"
             "• 🌐 Mua Proxy dân cư")
-    if not is_child():
-        base += f"\n• 🤖 Thuê bot riêng ({CREATE_BOT_FEE//1000}k)"
+    if not is_child(): base += f"\n• 🤖 Thuê bot riêng ({CREATE_BOT_FEE//1000}k)"
     if is_admin: base += "\n\n👑 <b>Bạn là ADMIN</b>"
     if foot: base += f"\n\n<i>{html.escape(foot)}</i>"
     return base
 
 def shop_home_text():
     prods = shop_list()
-    t = setting_get("shop_title")
-    return (f"<b>{html.escape(t)}</b>\n\n<blockquote>"
+    return (f"<b>{html.escape(setting_get('shop_title'))}</b>\n\n<blockquote>"
             f"📦 Có <b>{len(prods)}</b> sản phẩm\n💰 Thanh toán bằng số dư ví</blockquote>")
 
 def shop_home_markup():
@@ -822,8 +750,7 @@ def product_markup(pid, stock):
     return m
 
 def show(call, text, markup=None):
-    b = cur_bot()
-    cid, mid = call.message.chat.id, call.message.message_id
+    b = cur_bot(); cid, mid = call.message.chat.id, call.message.message_id
     if call.message.content_type == "text":
         try: b.edit_message_text(text, cid, mid, reply_markup=markup); return
         except ApiTelegramException as e:
@@ -835,12 +762,10 @@ def show(call, text, markup=None):
     except Exception as e: log.warning("show: %s", e)
 
 def send_qr(call, amount, memo, title, note):
-    b = cur_bot()
-    bank, acc, name = bank_info()
+    b = cur_bot(); bank, acc, name = bank_info()
     if acc in ("", "—"):
-        b.send_message(call.message.chat.id,
-            "⚠️ Admin chưa cấu hình ngân hàng. Vui lòng liên hệ!",
-            reply_markup=back_markup("menu_back")); return
+        b.send_message(call.message.chat.id, "⚠️ Admin chưa cấu hình ngân hàng. Vui lòng liên hệ!",
+                       reply_markup=back_markup("menu_back")); return
     params = {"acc": acc, "bank": bank, "template": "compact", "des": memo}
     if amount: params["amount"] = amount
     qr = "https://qr.sepay.vn/img?" + urllib.parse.urlencode(params)
@@ -855,10 +780,8 @@ def send_qr(call, amount, memo, title, note):
     except: pass
     try: b.send_photo(call.message.chat.id, qr, caption=cap, reply_markup=kb)
     except Exception as e:
-        log.warning("QR: %s", e)
-        b.send_message(call.message.chat.id, cap, reply_markup=kb)
+        log.warning("QR: %s", e); b.send_message(call.message.chat.id, cap, reply_markup=kb)
 
-# ══════════════ ADMIN PANEL ══════════════
 def admin_text():
     with db() as c:
         total_u = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -914,7 +837,6 @@ def admin_markup():
     m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
     return m
 
-# ══════════════ HANDLERS ══════════════
 def _user_from(tg):
     return get_or_create_user(tg.id, tg.username or "", tg.first_name or "Khách")
 
@@ -935,22 +857,21 @@ def register_all_handlers(bot):
         user_states.pop(m.from_user.id, None)
         bot.send_message(m.chat.id, "✅ Đã hủy. /menu để mở menu.")
 
-    @bot.callback_query_handler(func=lambda c: (c.data or "") == "noop")
-    def cb_noop(c):
-        try: bot.answer_callback_query(c.id, "Trang hiện tại")
-        except: pass
-
-    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith("smm_"))
+    # ==== CALLBACK ROUTER (không nhận smm_ và adm_smm để nhường cho module SMM) ====
+    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_", "adm_smm")))
     def cb_router(call):
         data = call.data or ""
-        if data == "noop": return
+        if data == "noop":
+            try: bot.answer_callback_query(call.id, "Trang hiện tại")
+            except: pass
+            return
         uid = call.from_user.id
         u = _user_from(call.from_user)
         is_admin = uid == cur_admin()
         try: bot.answer_callback_query(call.id)
         except: pass
 
-        # MAIN admin
+        # ============ MAIN ADMIN ============
         if data == "adm_panel":
             if not is_admin or is_child(): return
             show(call, admin_text(), admin_markup())
@@ -1015,7 +936,7 @@ def register_all_handlers(bot):
             for k, v in DEFAULT_SETTINGS.items(): setting_set(k, v)
             show(call, "✅ Đã khôi phục mặc định.", back_markup("adm_ui"))
 
-        # CHILD admin
+        # ============ CHILD ADMIN ============
         elif data == "cadm_panel":
             if not is_admin or not is_child(): return
             show(call, admin_text(), admin_markup())
@@ -1095,8 +1016,7 @@ def register_all_handlers(bot):
             if not is_admin or not is_child(): return
             now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with db() as c:
-                n = c.execute("DELETE FROM proxy_stock WHERE status='sold' AND expires_at!='' AND expires_at<?",
-                              (now_s,)).rowcount
+                n = c.execute("DELETE FROM proxy_stock WHERE status='sold' AND expires_at!='' AND expires_at<?", (now_s,)).rowcount
             show(call, f"✅ Xoá {n} proxy hết hạn.", back_markup("cadm_proxy"))
         elif data == "cadm_grant":
             if not is_admin or not is_child(): return
@@ -1123,7 +1043,7 @@ def register_all_handlers(bot):
             if not is_admin or not is_child(): return
             _cadm_export(call)
 
-        # User menu
+        # ============ USER MENU ============
         elif data == "menu_profile":
             show(call, f"<b>📊 TÀI KHOẢN</b>\n\n<blockquote>"
                        f"🆔 <code>{uid}</code>\n👤 {html.escape(call.from_user.first_name or 'Khách')}\n"
@@ -1141,7 +1061,7 @@ def register_all_handlers(bot):
                            f"❌ Thiếu {fmt(miss)}đ", kb); return
             user_states[uid] = "WAITING_BOT_TOKEN"
             show(call, f"<b>🤖 THUÊ BOT</b>\n\n"
-                       f"💰 {fmt(CREATE_BOT_FEE)}đ/{BOT_RENT_DAYS} ngày (trừ khi token hợp lệ)\n"
+                       f"💰 {fmt(CREATE_BOT_FEE)}đ/{BOT_RENT_DAYS} ngày\n"
                        f"🔄 Gia hạn {fmt(BOT_RENEW_FEE)}đ/{BOT_RENT_DAYS} ngày\n\n"
                        "1️⃣ Mở @BotFather → /newbot\n2️⃣ Copy token gửi vào đây:", back_markup())
         elif data == "mybots":
@@ -1168,13 +1088,12 @@ def register_all_handlers(bot):
             if is_child(): return
             send_qr(call, 0, f"DONATE{uid}", "❤️ DONATE", "🙏 Cảm ơn bạn!")
         elif data == "menu_support":
-            txt = setting_get("support_text")
-            show(call, f"<b>🎛️ HỖ TRỢ</b>\n\n{html.escape(txt)}", back_markup())
+            show(call, f"<b>🎛️ HỖ TRỢ</b>\n\n{html.escape(setting_get('support_text'))}", back_markup())
         elif data == "menu_back":
             user_states.pop(uid, None)
             show(call, home_text(u, is_admin), main_menu(uid))
 
-        # Shop
+        # ============ SHOP ============
         elif data == "shop_home":
             show(call, shop_home_text(), shop_home_markup())
         elif data.startswith("shop_view|"):
@@ -1189,36 +1108,40 @@ def register_all_handlers(bot):
                     types.InlineKeyboardButton("💳 Nạp ngay", callback_data="menu_deposit"),
                     types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home"))
                 show(call, f"⚠️ Thiếu {fmt(p['price']-u['balance'])}đ", kb); return
-            try: bot.delete_message(call.message.chat.id, call.message.message_id)
-            except: pass
+            # === PROXY ===
             if p["category"] == "Proxy":
                 ok, err, info = proxy_buy(uid, pid)
                 if not ok:
-                    bot.send_message(call.message.chat.id, f"❌ {err}"); return
-                bot.send_message(call.message.chat.id,
-                    f"<b>🎉 MUA PROXY OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-info['price'])}đ</b>")
+                    show(call, f"❌ {err}", back_markup("shop_home")); return
+                try: bot.delete_message(call.message.chat.id, call.message.message_id)
+                except: pass
                 line = (f"{info['protocol'].lower()}://{info['username']}:{info['password']}@{info['ip']}:{info['port']}"
                         if info['username'] else f"{info['protocol'].lower()}://{info['ip']}:{info['port']}")
-                txt = (f"<b>📦 {html.escape(info['name'])}</b>\n\n<blockquote>"
+                txt = (f"<b>🎉 MUA PROXY OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-info['price'])}đ</b>\n\n"
+                       f"<b>📦 {html.escape(info['name'])}</b>\n\n<blockquote>"
                        f"⏱ {info['days']} ngày | 📅 {info['expires_at']}\n"
                        f"🌐 <code>{info['ip']}:{info['port']}</code>\n")
                 if info['username']: txt += f"👤 <code>{info['username']}</code>\n"
                 if info['password']: txt += f"🔑 <code>{info['password']}</code>\n"
                 txt += f"</blockquote>\n\n<code>{html.escape(line)}</code>"
                 bot.send_message(call.message.chat.id, txt, reply_markup=
-                    types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my")))
-                try:
-                    bot.send_message(cur_admin(), f"💰 Proxy mới: <code>{uid}</code> - {fmt(info['price'])}đ")
+                    types.InlineKeyboardMarkup().add(
+                        types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my")))
+                try: bot.send_message(cur_admin(), f"💰 Proxy mới: <code>{uid}</code> - {fmt(info['price'])}đ")
                 except: pass
                 return
+            # === SẢN PHẨM THƯỜNG ===
             ok, res = shop_buy(uid, pid)
             if not ok:
-                bot.send_message(call.message.chat.id, f"❌ {res}"); return
-            bot.send_message(call.message.chat.id,
+                show(call, f"❌ {res}", back_markup("shop_home")); return
+            show(call,
                 f"<b>🎉 ĐẶT HÀNG OK!</b>\n\n<blockquote>"
                 f"🧾 #{res['order_id']}\n📦 {html.escape(res['name'])}\n"
                 f"💵 {fmt(res['price'])}đ\n🏦 Còn: <b>{fmt(u['balance']-res['price'])}đ</b></blockquote>\n\n"
-                "⚠️ Chờ admin xác nhận giao hàng.")
+                "⚠️ Chờ admin xác nhận giao hàng.",
+                types.InlineKeyboardMarkup(row_width=1).add(
+                    types.InlineKeyboardButton("🛍 Đơn của tôi", callback_data="shop_myorders"),
+                    types.InlineKeyboardButton("🔙 Cửa Hàng", callback_data="shop_home")))
             try:
                 bot.send_message(cur_admin(),
                     f"🔔 ĐƠN MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
@@ -1231,7 +1154,7 @@ def register_all_handlers(bot):
             txt += "</blockquote>"
             show(call, txt, back_markup("shop_home"))
 
-        # IPA
+        # ============ IPA ============
         elif data == "ipa_home":
             items = ipa_list(limit=40)
             if not items:
@@ -1255,7 +1178,7 @@ def register_all_handlers(bot):
                 log.warning("send ipa: %s", e)
                 bot.send_message(call.message.chat.id, "❌ Không gửi được file.")
 
-        # Proxy
+        # ============ PROXY ============
         elif data == "proxy_my":
             rows = proxy_my(uid)
             if not rows:
@@ -1289,7 +1212,7 @@ def register_all_handlers(bot):
             txt += f"📡 {r[4]}</blockquote>\n\n<code>{html.escape(line)}</code>"
             show(call, txt, back_markup("proxy_my"))
 
-    # ═══ STATE MESSAGE HANDLERS ═══
+    # ============ STATE MESSAGE HANDLERS ============
     @bot.message_handler(func=lambda m: m.from_user is not None and
         user_states.get(m.from_user.id) == "WAITING_BOT_TOKEN" and m.text and not m.text.startswith("/"))
     def h_token(m):
@@ -1298,7 +1221,6 @@ def register_all_handlers(bot):
         try: bot.delete_message(m.chat.id, m.message_id)
         except: pass
         def say(t): bot.send_message(m.chat.id, t, reply_markup=back_markup())
-       
         if tok == BOT_TOKEN or token_exists(tok):
             say("❌ Token đã dùng!"); return
         try: info = telebot.TeleBot(tok).get_me()
@@ -1306,9 +1228,8 @@ def register_all_handlers(bot):
         u = _user_from(m.from_user)
         if not is_admin:
             with db() as c:
-                cur = c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
-                                (CREATE_BOT_FEE, uid, CREATE_BOT_FEE))
-                if cur.rowcount == 0:
+                if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
+                             (CREATE_BOT_FEE, uid, CREATE_BOT_FEE)).rowcount == 0:
                     user_states.pop(uid, None); say(f"❌ Số dư không đủ ({fmt(u['balance'])}đ)"); return
         try:
             exp = save_user_bot(uid, tok, info.username)
@@ -1342,8 +1263,7 @@ def register_all_handlers(bot):
         u = get_or_create_user(uid, "", "")
         user_states.pop(m.from_user.id, None)
         bot.reply_to(m, f"✅ <code>{uid}</code>\n💵 {fmt(amt)}đ\n🏦 Số dư: <b>{fmt(u['balance'])}đ</b>")
-        try:
-            bot.send_message(uid, f"💰 Số dư: {'+' if amt>=0 else ''}{fmt(amt)}đ\n🏦 Còn: <b>{fmt(u['balance'])}đ</b>")
+        try: bot.send_message(uid, f"💰 Số dư: {'+' if amt>=0 else ''}{fmt(amt)}đ\n🏦 Còn: <b>{fmt(u['balance'])}đ</b>")
         except: pass
 
     @bot.message_handler(func=lambda m: m.from_user is not None and m.from_user.id == cur_admin()
@@ -1454,21 +1374,15 @@ def register_all_handlers(bot):
             bot.reply_to(m, "Bấm /menu nhé!"); return
         try: reply_ai(bot, m)
         except Exception as e:
-            log.exception("AI: %s", e)
-            bot.reply_to(m, "🤖 Bot bận!")
+            log.exception("AI: %s", e); bot.reply_to(m, "🤖 Bot bận!")
 
-    # ═══ SMM (đăng ký sau cùng để không xung đột) ═══
+    # ==== SMM cuối cùng ====
     smm.register(bot, {
-        "db_path_fn": cur_db,
-        "fmt": fmt,
-        "cur_admin": cur_admin,
-        "get_user": get_or_create_user,
-        "show": show,
-        "back_markup": back_markup,
-        "user_states": user_states,
+        "db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
+        "get_user": get_or_create_user, "show": show,
+        "back_markup": back_markup, "user_states": user_states,
     })
 
-# ══════════════ ADMIN HELPERS ══════════════
 def _adm_bots_list(call):
     with sqlite3.connect(MAIN_DB) as c:
         rows = c.execute("SELECT id,user_id,bot_username,status,expires_at FROM user_bots ORDER BY id DESC LIMIT 50").fetchall()
@@ -1630,9 +1544,8 @@ def _cadm_ipa_view(call, pid, note=""):
     show(call, txt, kb)
 
 def _cadm_settings(call):
-    keys = [("bank_name","🏦 Tên NH"),("account_no","💳 Số TK"),
-            ("account_name","👤 Chủ TK"),("home_title","🏠 Tiêu đề"),
-            ("home_subtitle","📝 Phụ đề"),("welcome_msg","👋 Lời chào"),
+    keys = [("bank_name","🏦 Tên NH"),("account_no","💳 Số TK"),("account_name","👤 Chủ TK"),
+            ("home_title","🏠 Tiêu đề"),("home_subtitle","📝 Phụ đề"),("welcome_msg","👋 Lời chào"),
             ("shop_title","🛒 Shop"),("support_text","🎛️ Hỗ trợ"),("footer_note","🔖 Ghi chú")]
     txt = "<b>⚙️ CÀI ĐẶT</b>\n\n"
     for k, lb in keys: txt += f"{lb}\n<i>→ {html.escape((setting_get(k) or '—')[:60])}</i>\n\n"
@@ -1642,8 +1555,7 @@ def _cadm_settings(call):
     show(call, txt, kb)
 
 def _cadm_export(call):
-    b = cur_bot()
-    db_path = cur_db()
+    b = cur_bot(); db_path = cur_db()
     if not os.path.exists(db_path):
         show(call, "❌ DB chưa tồn tại.", back_markup("cadm_panel")); return
     show(call, "📤 Đang xuất DB...", back_markup("cadm_panel"))
@@ -1709,9 +1621,8 @@ def _my_bot_renew(call, bid, u):
                  types.InlineKeyboardButton("💳 Nạp", callback_data="menu_deposit"),
                  types.InlineKeyboardButton("🔙 Bot", callback_data=f"mybot_view|{bid}"))); return
     with db() as c:
-        cur = c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
-                        (BOT_RENEW_FEE, call.from_user.id, BOT_RENEW_FEE))
-        if cur.rowcount == 0:
+        if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
+                     (BOT_RENEW_FEE, call.from_user.id, BOT_RENEW_FEE)).rowcount == 0:
             show(call, "❌ Số dư không đủ.", back_markup("mybots")); return
     new = renew_bot(call.from_user.id, tk)
     if tk not in active_child_bots: start_child_bot(tk, call.from_user.id, force=True)
@@ -1719,29 +1630,25 @@ def _my_bot_renew(call, bid, u):
          types.InlineKeyboardMarkup(row_width=1).add(
              types.InlineKeyboardButton("🔙 Bot", callback_data=f"mybot_view|{bid}")))
 
-# ══════════════ ADMIN SLASH COMMANDS ══════════════
 @main_bot.message_handler(commands=["admin","addmoney","backup","restore","broadcast","stats"])
 def adm_cmd(m):
     if m.from_user.id != ADMIN_ID: return
     cmd = m.text.split()[0].split("@")[0].lower()
     parts = m.text.split(maxsplit=2)
+    _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
+    _ctx.bot_instance = main_bot
     if cmd == "/admin":
-        _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
-        _ctx.bot_instance = main_bot
         main_bot.send_message(m.chat.id, admin_text(), reply_markup=admin_markup())
     elif cmd == "/addmoney":
         try: uid, amt = int(parts[1]), int(parts[2])
         except: main_bot.reply_to(m, "/addmoney uid số_tiền"); return
-        _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
         admin_add_money(uid, amt)
         u = get_or_create_user(uid, "", "")
         main_bot.reply_to(m, f"✅ Số dư: {fmt(u['balance'])}đ")
     elif cmd == "/backup":
-        _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
         main_bot.reply_to(m, "💾 Đang backup...")
         main_bot.reply_to(m, "✅ Xong!" if backup_upload() else "❌ Lỗi!")
     elif cmd == "/restore":
-        _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
         main_bot.reply_to(m, "🔄 Đang restore...")
         if backup_restore():
             init_db(MAIN_DB, is_main=True); main_bot.reply_to(m, "✅ OK!")
@@ -1766,15 +1673,13 @@ def adm_cmd(m):
             bots = c.execute("SELECT COUNT(*) FROM user_bots WHERE status='active'").fetchone()[0]
         main_bot.reply_to(m, f"📊 Users: {users} | Bot con: {bots}")
 
-# ══════════════ WEBHOOK ══════════════
 def wh_note(st, dt=""):
     line = f"{datetime.now():%H:%M:%S} [{st}] {dt}"[:220]
     webhook_log.appendleft(line); log.info("SePay: %s", line)
 
 @app.route("/sepaywebhook", methods=["POST"])
 def sepay_webhook():
-    _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
-    _ctx.bot_instance = main_bot
+    _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False; _ctx.bot_instance = main_bot
     if not SEPAY_API_KEY:
         wh_note("503", "chưa set key"); return jsonify({"success": False}), 503
     auth = request.headers.get("Authorization", "")
@@ -1824,7 +1729,6 @@ def home(): return "Bot Active", 200
 @app.route("/health")
 def health(): return "ok", 200
 
-# ══════════════ KEEP ALIVE ══════════════
 def keep_alive():
     url = env("RENDER_EXTERNAL_URL") or ("https://" + env("RENDER_EXTERNAL_HOSTNAME") if env("RENDER_EXTERNAL_HOSTNAME") else "")
     if not url:
@@ -1848,41 +1752,31 @@ def run_main_polling():
         except Exception as e:
             log.warning("Polling: %s", e); time.sleep(5)
 
-# ══════════════ MAIN ══════════════
 def main():
-    _ctx.db_path = MAIN_DB
-    _ctx.admin_id = ADMIN_ID
-    _ctx.is_child = False
-    _ctx.bot_instance = main_bot
-    _ctx.bot_username = BOT_USERNAME
-
+    _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
+    _ctx.bot_instance = main_bot; _ctx.bot_username = BOT_USERNAME
     if BACKUP_CHAT_ID and not os.path.exists(MAIN_DB):
         log.info("🔄 DB chưa có → restore...")
         backup_restore()
     init_db(MAIN_DB, is_main=True)
     register_all_handlers(main_bot)
-
     if not SEPAY_API_KEY: log.warning("⚠️ Chưa set SEPAY_API_KEY!")
     if not GEMINI_API_KEY: log.warning("⚠️ Chưa set GEMINI_API_KEY!")
     if not BACKUP_CHAT_ID: log.warning("⚠️ Chưa set BACKUP_CHAT_ID!")
-
     try:
         main_bot.set_my_commands([
             types.BotCommand("start", "Mở menu chính"),
-            types.BotCommand("menu",  "Mở menu chính"),
+            types.BotCommand("menu", "Mở menu chính"),
             types.BotCommand("admin", "Admin Panel"),
         ])
     except: pass
-
     threading.Thread(target=load_child_bots, daemon=True).start()
     threading.Thread(target=run_main_polling, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=backup_loop, daemon=True).start()
     threading.Thread(target=bot_checker_loop, daemon=True).start()
     smm.start_polling_loop(MAIN_DB)
-
     log.info("✅ Bot chạy. Main DB: %s | Bots dir: %s | Port: %s", MAIN_DB, BOTS_DIR, PORT)
-
     try:
         from waitress import serve
         serve(app, host="0.0.0.0", port=PORT, threads=8)
