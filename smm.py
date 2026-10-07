@@ -116,7 +116,7 @@ def svc_get(p, sid):
     return dict(zip(["id","platform","name","api_service","cost","price","min","max","active"], r))
 
 def svc_add(p, pl, nm, api, cost, price, mn, mx):
-    return _q(p, "INSERT INTO smm_services (platform,name,api_service,cost,price,min,max) VALUES (?,?,?,?,?,?,?,?)",
+    return _q(p, "INSERT INTO smm_services (platform,name,api_service,cost,price,min,max) VALUES (?,?,?,?,?,?,?,)",
               (pl, nm, str(api), cost, price, mn, mx))
 def svc_update(p, sid, f, v):
     if f not in ("platform","name","api_service","cost","price","min","max","active"): return
