@@ -9,90 +9,101 @@ import re, sys, py_compile
 src_path = sys.argv[1] if len(sys.argv) > 1 else "botted.py"
 out_path = sys.argv[2] if len(sys.argv) > 2 else "botted_fixed.py"
 
-NEW_TIKTOK = r'''UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+NEW_TIKTOK = r'''UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 URL_RE = re.compile(r"https?://(?:[\w-]+\.)?tiktok\.com/\S+", re.I)
 MAX_UPLOAD = 49 * 1024 * 1024
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 link_cache = {}
+
+# ── Proxy tự động (tải từ GitHub mỗi giờ, không cần PROXY_URL) ──
+PROXY_LIST_URLS = [
+    "https://raw.githubusercontent.com/maximilianfeix/proxy-scraper/proxy-list/tiktok.txt",
+    "https://cdn.jsdelivr.net/gh/ProxyScrape/free-proxy-list@main/proxies/protocols/http/data.txt",
+    "https://raw.githubusercontent.com/dinoz0rg/proxy-list/main/checked_proxies/http.txt",
+]
+_proxy_cache = []
+_proxy_lock2 = threading.Lock()
+_last_proxy_update = [0.0]
+
+def _refresh_proxy_list():
+    global _proxy_cache
+    for url in PROXY_LIST_URLS:
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                lines = [l.strip() for l in r.text.strip().split("\n") if l.strip()]
+                valid = [l for l in lines if ":" in l and not l.startswith("#")]
+                if len(valid) >= 5:
+                    with _proxy_lock2: _proxy_cache = valid
+                    log.info("✅ Tải %d proxy từ %s", len(valid), url.split("/")[2]); return
+        except Exception as e:
+            log.warning("Proxy list lỗi: %s", e)
+
+def _get_random_proxy():
+    now = time.time()
+    if now - _last_proxy_update[0] > 3600 or not _proxy_cache:
+        _refresh_proxy_list(); _last_proxy_update[0] = now
+    with _proxy_lock2:
+        if _proxy_cache:
+            p = random.choice(_proxy_cache)
+            if not p.startswith("http"): p = "http://" + p
+            return {"http": p, "https": p}
+    return None
+
+def _get_proxies():
+    if PROXY_URL:
+        return {"http": PROXY_URL, "https": PROXY_URL}
+    return _get_random_proxy()
 
 TIKWM_HOST = "https://www.tikwm.com"
 TIKWM_API = TIKWM_HOST + "/api/"
+TIKWM_HOSTS = ["https://www.tikwm.com", "https://tikwm.com"]
 tik_lock = threading.Lock()
 _last_tikwm = [0.0]
-
+tik_last_error = [""]
 
 def _abs(u):
-    """tikwm hay trả link tương đối (/video/media/...), đổi thành link đầy đủ."""
-    if not u:
-        return ""
-    if u.startswith("//"):
-        return "https:" + u
-    if u.startswith("/"):
-        return TIKWM_HOST + u
+    if not u: return ""
+    if u.startswith("//"): return "https:" + u
+    if u.startswith("/"): return TIKWM_HOST + u
     return u
 
-
 def download_file(url, name):
-    if not url:
-        return None
+    if not url: return None
     try:
         with requests.get(url, headers={**UA, "Referer": TIKWM_HOST + "/"}, stream=True,
-                          timeout=(10, 60), proxies=PROXIES) as r:
+                          timeout=(10, 60), proxies=_get_proxies()) as r:
             r.raise_for_status()
-            if int(r.headers.get("Content-Length") or 0) > MAX_UPLOAD:
-                return None
+            if int(r.headers.get("Content-Length") or 0) > MAX_UPLOAD: return None
             buf, total = io.BytesIO(), 0
             for chunk in r.iter_content(256 * 1024):
                 total += len(chunk)
-                if total > MAX_UPLOAD:
-                    return None
+                if total > MAX_UPLOAD: return None
                 buf.write(chunk)
-            buf.seek(0)
-            buf.name = name
-            return buf
+            buf.seek(0); buf.name = name; return buf
     except Exception as e:
-        log.warning("Tải file lỗi: %s", e)
-        return None
-
+        log.warning("Tải file lỗi: %s", e); return None
 
 def cache_put(vid, value):
-    if len(link_cache) > 2000:
-        link_cache.clear()
+    if len(link_cache) > 2000: link_cache.clear()
     link_cache[vid] = value
-
 
 def mp3_markup(vid, extra_url=None):
     m = types.InlineKeyboardMarkup(row_width=1)
-    if extra_url:
-        m.add(types.InlineKeyboardButton("📥 Mở link video", url=extra_url))
-    if vid:
-        m.add(types.InlineKeyboardButton("🎵 Tải nhạc MP3", callback_data=f"dl_mp3|{vid}"))
+    if extra_url: m.add(types.InlineKeyboardButton("📥 Mở link video", url=extra_url))
+    if vid: m.add(types.InlineKeyboardButton("🎵 Tải nhạc MP3", callback_data=f"dl_mp3|{vid}"))
     return m
-
 
 def safe_edit(bot, chat_id, mid, text):
     try:
-        if mid:
-            bot.edit_message_text(text, chat_id, mid)
-            return
-    except Exception:
-        pass
-    try:
-        bot.send_message(chat_id, text)
-    except Exception:
-        pass
-
-
-tik_last_error = [""]
-TIKWM_HOSTS = ["https://www.tikwm.com", "https://tikwm.com"]
-
+        if mid: bot.edit_message_text(text, chat_id, mid); return
+    except Exception: pass
+    try: bot.send_message(chat_id, text)
+    except Exception: pass
 
 def _resolve_tiktok_url(url):
-    """Đổi link rút gọn (vt./vm.tiktok.com) thành link đầy đủ có /video/<id>."""
     try:
         if re.search(r"//(vt|vm)\.tiktok\.com/", url) or "/t/" in url:
-            r = requests.get(url, headers=UA, allow_redirects=True, timeout=15, proxies=PROXIES)
+            r = requests.get(url, headers=UA, allow_redirects=True, timeout=15, proxies=_get_proxies())
             final = r.url or ""
             if "tiktok.com" in final and ("/video/" in final or "/photo/" in final):
                 return final.split("?")[0]
@@ -100,9 +111,20 @@ def _resolve_tiktok_url(url):
         log.warning("Giải link rút gọn lỗi: %s", e)
     return url
 
+def _ssave_fallback(url):
+    """API dự phòng khi tikwm bị 403."""
+    try:
+        r = requests.get("https://api.ssave.cc/open/v1/extract",
+                         params={"url": url, "type": "all"},
+                         headers=UA, timeout=25, proxies=_get_proxies())
+        if r.status_code == 200:
+            j = r.json()
+            if j.get("data"): return j["data"]
+    except Exception as e:
+        log.warning("Ssave lỗi: %s", e)
+    return None
 
 def tikwm_info(url, retries=2):
-    """Gọi API tikwm, trả về dict `data` hoặc None. Lý do lỗi lưu trong tik_last_error."""
     full = _resolve_tiktok_url(url)
     targets = [full] + ([url] if url != full else [])
     tik_last_error[0] = ""
@@ -113,19 +135,18 @@ def tikwm_info(url, retries=2):
                     j = {}
                     with tik_lock:
                         wait = 1.2 - (time.time() - _last_tikwm[0])
-                        if wait > 0:
-                            time.sleep(wait)
+                        if wait > 0: time.sleep(wait)
                         _last_tikwm[0] = time.time()
                         try:
                             hdr = {**UA, "Referer": host + "/"}
+                            px = _get_proxies()
                             if method == "post":
                                 r = requests.post(host + "/api/", data={"url": target, "hd": 1},
-                                                  headers=hdr, timeout=25, proxies=PROXIES)
+                                                  headers=hdr, timeout=25, proxies=px)
                             else:
                                 r = requests.get(host + "/api/", params={"url": target, "hd": 1},
-                                                 headers=hdr, timeout=25, proxies=PROXIES)
-                            try:
-                                j = r.json()
+                                                 headers=hdr, timeout=25, proxies=px)
+                            try: j = r.json()
                             except Exception:
                                 tik_last_error[0] = "HTTP %s, không phải JSON: %s" % (
                                     r.status_code, (r.text or "")[:100].replace("\n", " "))
@@ -139,83 +160,69 @@ def tikwm_info(url, retries=2):
                     log.warning("tikwm [%s %s] %s", host, method, tik_last_error[0])
                     if "limit" in str(j.get("msg", "")).lower():
                         time.sleep(2)
+        for target in targets:
+            data = _ssave_fallback(target)
+            if data:
+                return {
+                    "id": data.get("id") or str(int(time.time())),
+                    "title": data.get("title", ""),
+                    "play": data.get("play") or data.get("video"),
+                    "hdplay": data.get("hd") or data.get("play") or data.get("video"),
+                    "music": data.get("music") or data.get("audio"),
+                    "music_info": {"title": data.get("music_title", ""), "author": data.get("author", "")},
+                    "images": data.get("images") or [],
+                }
         time.sleep(1.5)
     return None
-
 
 def deliver_tiktok(bot, chat_id, url):
     data = tikwm_info(url)
     if not data:
-        msg = ("❌ Không tải được. Video phải công khai, link đúng dạng TikTok. "
-               "Thử lại sau ít phút nhé!")
+        msg = "❌ Không tải được. Video phải công khai, link đúng dạng TikTok. Thử lại sau ít phút nhé!"
         if chat_id == ADMIN_ID:
             msg += "\n\n🛠 Chi tiết (chỉ admin thấy): " + html.escape(tik_last_error[0] or "không rõ")
         return False, msg
-
     vid = str(data.get("id") or "")
     minfo = data.get("music_info") or {}
     music = _abs(data.get("music") or minfo.get("play"))
-    if vid:
-        cache_put(vid, {"url": url, "music": music, "info": minfo})
-
+    if vid: cache_put(vid, {"url": url, "music": music, "info": minfo})
     title = html.escape((data.get("title") or "")[:200])
-    caption = ("🎬 <b>TikTok Video</b>"
-               + (f"\n\n{title}" if title else "")
+    caption = ("🎬 <b>TikTok Video</b>" + (f"\n\n{title}" if title else "")
                + "\n\n✨ <i>Đã gỡ logo thành công!</i>")
     kb = mp3_markup(vid)
-
-    try:
-        bot.send_chat_action(chat_id, "upload_video")
-    except Exception:
-        pass
-
-    # Bài đăng dạng ảnh (slideshow)
+    try: bot.send_chat_action(chat_id, "upload_video")
+    except Exception: pass
     images = [_abs(i) for i in (data.get("images") or []) if i]
     if images:
         sent = False
         for i in range(0, len(images), 10):
             try:
-                bot.send_media_group(chat_id, [types.InputMediaPhoto(u) for u in images[i:i + 10]])
+                bot.send_media_group(chat_id, [types.InputMediaPhoto(u) for u in images[i:i+10]])
                 sent = True
-            except Exception as e:
-                log.warning("send_media_group: %s", e)
+            except Exception as e: log.warning("send_media_group: %s", e)
         if sent:
-            bot.send_message(chat_id, caption, reply_markup=kb)
-            return True, ""
-
-    # Video: ưu tiên bản "play" (không logo, nhẹ), sau đó "hdplay"
+            bot.send_message(chat_id, caption, reply_markup=kb); return True, ""
     cands = []
     for k in ("play", "hdplay"):
         u = _abs(data.get(k))
-        if u and u not in cands:
-            cands.append(u)
-
-    # Cách 1: bot tải về rồi tự upload
+        if u and u not in cands: cands.append(u)
     for vu in cands:
         f = download_file(vu, "tiktok.mp4")
-        if not f:
-            continue
+        if not f: continue
         try:
             bot.send_video(chat_id, f, caption=caption, supports_streaming=True, reply_markup=kb)
             return True, ""
-        except Exception as e:
-            log.warning("send_video (upload): %s", e)
-
-    # Cách 2: nhờ Telegram tự tải từ link (giới hạn ~20MB)
+        except Exception as e: log.warning("send_video upload: %s", e)
     for vu in cands:
         try:
             bot.send_video(chat_id, vu, caption=caption, supports_streaming=True, reply_markup=kb)
             return True, ""
-        except Exception as e:
-            log.warning("send_video (url): %s", e)
-
-    # Cách 3: gửi nút mở link
+        except Exception as e: log.warning("send_video url: %s", e)
     if cands:
         bot.send_message(chat_id, caption + "\n\n⚠️ Không gửi trực tiếp được, bấm nút để mở video.",
                          reply_markup=mp3_markup(vid, extra_url=cands[0]))
         return True, ""
     return False, "❌ Không lấy được link video."
-
 
 def deliver_mp3(bot, chat_id, vid):
     item = link_cache.get(vid)
@@ -223,29 +230,24 @@ def deliver_mp3(bot, chat_id, vid):
         src, music, info = item.get("url"), item.get("music"), item.get("info") or {}
     else:
         src, music, info = (item or f"https://www.tiktok.com/@tiktok/video/{vid}"), "", {}
-
     f = download_file(music, "tiktok_audio.mp3") if music else None
-    if not f:  # cache mất (bot restart) hoặc link nhạc hết hạn -> hỏi lại API
+    if not f:
         data = tikwm_info(src)
         if data:
             info = data.get("music_info") or {}
             music = _abs(data.get("music") or info.get("play"))
             f = download_file(music, "tiktok_audio.mp3")
-            if not f:
-                info = info or {}
+            if not f: info = info or {}
     if f:
-        try:
-            bot.send_chat_action(chat_id, "upload_audio")
-        except Exception:
-            pass
+        try: bot.send_chat_action(chat_id, "upload_audio")
+        except Exception: pass
         try:
             bot.send_audio(chat_id, f,
                            title=(info.get("title") or "TikTok Audio")[:60],
                            performer=(info.get("author") or "TikTok")[:60],
                            caption="🎵 <i>Đã tách nhạc thành công!</i>")
             return
-        except Exception as e:
-            log.warning("send_audio: %s", e)
+        except Exception as e: log.warning("send_audio: %s", e)
     bot.send_message(chat_id, "❌ Không tải được nhạc.")
 '''
 
@@ -406,7 +408,7 @@ for _n in ("admin_add_money", "process_deposit", "process_donation", "shop_purch
 
 NEW_GH = r'''# ══════════════════════════ BACKUP LỚP 2: GITHUB (miễn phí) ══════════════════════════
 # Cần 2 biến môi trường: GH_BACKUP_TOKEN và GH_BACKUP_REPO (dạng "user/repo-rieng-tu").
-# BẮT BUỘC dùng repo PRIVATE và KHÁC repo đang deploy (nếu không mỗi lần backup sẽ gây deploy lại).
+# BẮT BUỘC dùng repo PRIVATE và KHÁC repo đang deploy.
 GH_TOKEN = env("GH_BACKUP_TOKEN")
 GH_REPO = env("GH_BACKUP_REPO")
 GH_PATH = env("GH_BACKUP_PATH", "bot_database.db")
@@ -714,11 +716,11 @@ def replace_block(s, start_re, end_re, new, label):
 
 
 # 1) TikTok
-if "def tikwm_info" in s:
-    log.append("= TikTok: đã vá từ trước, bỏ qua")
+if "def tikwm_info" in s and "_ssave_fallback" in s:
+    log.append("= TikTok: đã vá từ trước (V3), bỏ qua")
 else:
     s = replace_block(s, r"^UA = \{", r"^def register_downloader\(bot\):", NEW_TIKTOK, "TikTok")
-    log.append("+ TikTok: đã thay bằng tikwm (video + MP3)")
+    log.append("+ TikTok: đã thay bằng TikTok V3 (proxy auto + Ssave fallback)")
 
 # 2) Backup / restore
 if "def schedule_backup" in s:
@@ -748,14 +750,12 @@ else:
                    "    if BACKUP_CHAT_ID and not os.path.exists(DB_PATH):\n"
                    "        backup_restore()")
 
-
 # 5) Sửa dòng đầu bị mất dấu '#'
 if s.startswith(": utf-8"):
     s = "# -*- coding: utf-8 -*-\n" + s.split("\n", 1)[1]
     log.append("+ Đã sửa dòng đầu file (thiếu '# -*- coding')")
 
-# 6) Đăng ký bộ tải TikTok cho BOT CHÍNH (trước đây chỉ bot con có) - PHẢI đặt trước
-#    callback_listener và chat_or_fallback vì telebot chọn handler đầu tiên khớp.
+# 6) Đăng ký bộ tải TikTok cho BOT CHÍNH
 if re.search(r"^[ \t]*register_downloader\(main_bot\)", s, re.M):
     log.append("= Bot chính: đã đăng ký bộ tải TikTok")
 else:
@@ -776,8 +776,7 @@ if n7:
 if "snaptik_fetch(" in s:
     log.append("! Vẫn còn chỗ gọi snaptik_fetch(), hãy thay bằng tikwm_info()")
 
-
-# 8) Backup lớp 2 lên GitHub (miễn phí)
+# 8) Backup lớp 2 lên GitHub
 if "def gh_backup_upload" in s:
     log.append("= Backup GitHub: đã có")
 else:
@@ -795,7 +794,7 @@ else:
     s = replace_block(s, r"^PERSONA = \(", r"^# ═+ BOT CON", NEW_AI, "AI")
     log.append("+ AI: model dự phòng, nhớ hội thoại, tra Google, biết danh sách sản phẩm, định dạng đẹp")
 
-# 10) Model mặc định (gemini-3.8-flash không có trong danh sách model của Google)
+# 10) Model mặc định
 if 'env("GEMINI_MODEL", "gemini-3.8-flash")' in s:
     s = s.replace('env("GEMINI_MODEL", "gemini-3.8-flash")', 'env("GEMINI_MODEL", "gemini-3.5-flash")')
     log.append("+ Đã đổi model mặc định sang gemini-3.5-flash")
