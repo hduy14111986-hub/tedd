@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con thuê + Buff SMM"""
+"""BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con thuê + Buff SMM + API Data"""
 import os, re, time, html, hmac, sqlite3, logging, threading, urllib.parse
 from collections import deque
 from contextlib import contextmanager
@@ -14,6 +14,7 @@ try:
 except Exception:
     genai = None; gtypes = None
 import smm
+import data_api
 
 def env(k, d=""): return os.environ.get(k, d).strip()
 
@@ -91,7 +92,8 @@ CREATE TABLE IF NOT EXISTS transactions (tx_id TEXT PRIMARY KEY, user_id INTEGER
 CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL, description TEXT DEFAULT '', price INTEGER NOT NULL,
   category TEXT DEFAULT 'Data', stock INTEGER DEFAULT -1, sold INTEGER DEFAULT 0,
-  active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+  active INTEGER DEFAULT 1, api_product_code TEXT DEFAULT '',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER, product_id INTEGER, product_name TEXT, price INTEGER,
   status TEXT DEFAULT 'paid', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
@@ -121,6 +123,7 @@ DEFAULT_SETTINGS = {
     "support_text": "Nhắn admin để được hỗ trợ nhanh nhất!",
     "footer_note": "Cảm ơn bạn đã sử dụng dịch vụ! ❤️",
     "bank_name": "", "account_no": "", "account_name": "",
+    "data_api_url": "", "data_api_key": "", "data_api_method": "POST",
 }
 DEFAULT_PRODUCTS = [
     ("🌐 Data 30K – Không giới hạn", 30000, "Data", "Gói KHÔNG GIỚI HẠN data 30 ngày. Mọi nhà mạng. 4G/5G."),
@@ -138,6 +141,9 @@ def init_db(path=None, is_main=False):
         except: pass
         c.executescript(SCHEMA)
         if is_main: c.executescript(MAIN_ONLY)
+        # Migration: thêm cột api_product_code nếu DB cũ
+        try: c.execute("ALTER TABLE products ADD COLUMN api_product_code TEXT DEFAULT ''")
+        except: pass
         for k, v in DEFAULT_SETTINGS.items():
             c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (k, v))
         if c.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
@@ -210,11 +216,12 @@ def shop_list_all(limit=200):
 
 def shop_get(pid):
     with db() as c:
-        r = c.execute("SELECT id,name,description,price,category,stock,sold,active FROM products WHERE id=?", (pid,)).fetchone()
+        r = c.execute("SELECT id,name,description,price,category,stock,sold,active,COALESCE(api_product_code,'') FROM products WHERE id=?", (pid,)).fetchone()
     if not r: return None
-    return dict(zip(["id","name","description","price","category","stock","sold","active"], r))
+    return dict(zip(["id","name","description","price","category","stock","sold","active","api_product_code"], r))
 
 def shop_buy(uid, pid):
+    """Trừ tiền + tạo đơn. Trả về (ok, dict|err)."""
     with db() as c:
         r = c.execute("SELECT name,price,stock,active FROM products WHERE id=?", (pid,)).fetchone()
         if not r: return False, "Không tìm thấy SP"
@@ -422,8 +429,7 @@ def run_child_polling(token, bot):
             if e.error_code in (401, 404):
                 with locks["child"]: active_child_bots.pop(token, None)
                 with sqlite3.connect(MAIN_DB) as c:
-                    c.execute("UPDATE user_bots SET status='inactive' WHERE bot_token=?", (token,))
-                    c.commit()
+                    c.execute("UPDATE user_bots SET status='inactive' WHERE bot_token=?", (token,)); c.commit()
                 return
             first = False; time.sleep(5)
         except Exception as e:
@@ -736,9 +742,10 @@ def shop_home_markup():
 
 def product_detail_text(p):
     st = "♾️ Vô hạn" if p["stock"] < 0 else ("❌ Hết hàng" if p["stock"] == 0 else f"📦 Còn {p['stock']}")
+    api_tag = " 🤖 Tự động" if (p.get("api_product_code") or "").strip() and setting_get("data_api_url") else ""
     return (f"<b>📦 {html.escape(p['name'])}</b>\n\n<blockquote>"
             f"{html.escape(p['description'][:500])}\n\n"
-            f"📂 <b>{html.escape(p['category'])}</b>\n"
+            f"📂 <b>{html.escape(p['category'])}</b>{api_tag}\n"
             f"💵 <b>{fmt(p['price'])}đ</b>\n"
             f"{st} | 🔥 Đã bán: <b>{p['sold']}</b></blockquote>")
 
@@ -752,14 +759,23 @@ def product_markup(pid, stock):
 def show(call, text, markup=None):
     b = cur_bot(); cid, mid = call.message.chat.id, call.message.message_id
     if call.message.content_type == "text":
-        try: b.edit_message_text(text, cid, mid, reply_markup=markup); return
+        try:
+            b.edit_message_text(text, cid, mid, reply_markup=markup); return
         except ApiTelegramException as e:
-            if "not modified" in str(e): return
-        except: pass
+            if "not modified" in str(e).lower(): return
+            log.warning("show edit failed: %s", e)
+        except Exception as e:
+            log.warning("show edit error: %s", e)
     try: b.delete_message(cid, mid)
     except: pass
-    try: b.send_message(cid, text, reply_markup=markup)
-    except Exception as e: log.warning("show: %s", e)
+    try:
+        b.send_message(cid, text, reply_markup=markup)
+    except ApiTelegramException as e:
+        log.warning("show send failed: %s", e)
+        try: b.send_message(cid, text, reply_markup=markup, parse_mode=None)
+        except Exception as e2: log.warning("show fallback failed: %s", e2)
+    except Exception as e:
+        log.warning("show send error: %s", e)
 
 def send_qr(call, amount, memo, title, note):
     b = cur_bot(); bank, acc, name = bank_info()
@@ -818,27 +834,122 @@ def admin_markup():
               types.InlineKeyboardButton("📱 Kho IPA", callback_data="cadm_ipa"))
         m.add(types.InlineKeyboardButton("🌐 Proxy", callback_data="cadm_proxy"),
               types.InlineKeyboardButton("🔥 Buff SMM", callback_data="adm_smm"))
-        m.add(types.InlineKeyboardButton("💰 Cấp tiền", callback_data="cadm_grant"),
-              types.InlineKeyboardButton("📊 Thống kê", callback_data="cadm_stats"))
-        m.add(types.InlineKeyboardButton("⚙️ Cài đặt", callback_data="cadm_settings"),
-              types.InlineKeyboardButton("📣 Thông báo", callback_data="cadm_broadcast"))
-        m.add(types.InlineKeyboardButton("📤 Xuất DB", callback_data="cadm_export"),
-              types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
+        m.add(types.InlineKeyboardButton("🌐 API Data", callback_data="adm_data_api"),
+              types.InlineKeyboardButton("💰 Cấp tiền", callback_data="cadm_grant"))
+        m.add(types.InlineKeyboardButton("📊 Thống kê", callback_data="cadm_stats"),
+              types.InlineKeyboardButton("⚙️ Cài đặt", callback_data="cadm_settings"))
+        m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="cadm_broadcast"),
+              types.InlineKeyboardButton("📤 Xuất DB", callback_data="cadm_export"))
+        m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
         return m
     m = types.InlineKeyboardMarkup(row_width=2)
     m.add(types.InlineKeyboardButton("🤖 Bot con", callback_data="adm_bots"),
           types.InlineKeyboardButton("🔥 Buff SMM", callback_data="adm_smm"))
-    m.add(types.InlineKeyboardButton("📊 Thống kê", callback_data="adm_stats"),
-          types.InlineKeyboardButton("💰 Cấp tiền", callback_data="adm_grant"))
-    m.add(types.InlineKeyboardButton("🎨 Giao diện", callback_data="adm_ui"),
-          types.InlineKeyboardButton("📣 Thông báo", callback_data="adm_broadcast"))
-    m.add(types.InlineKeyboardButton("💾 Backup ngay", callback_data="adm_backup"),
-          types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"))
-    m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
+    m.add(types.InlineKeyboardButton("🌐 API Data", callback_data="adm_data_api"),
+          types.InlineKeyboardButton("📊 Thống kê", callback_data="adm_stats"))
+    m.add(types.InlineKeyboardButton("💰 Cấp tiền", callback_data="adm_grant"),
+          types.InlineKeyboardButton("🎨 Giao diện", callback_data="adm_ui"))
+    m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="adm_broadcast"),
+          types.InlineKeyboardButton("💾 Backup ngay", callback_data="adm_backup"))
+    m.add(types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"),
+          types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
     return m
 
 def _user_from(tg):
     return get_or_create_user(tg.id, tg.username or "", tg.first_name or "Khách")
+
+def _handle_shop_buy(bot, call, data, uid, u):
+    """Xử lý mua hàng — có try/except và hỗ trợ API Data tự động."""
+    pid = int(data.split("|", 1)[1])
+    p = shop_get(pid)
+    if not p:
+        show(call, "❌ Không tìm thấy sản phẩm.", back_markup("shop_home")); return
+    # Refresh balance
+    u = _user_from(call.from_user)
+    if u["balance"] < p["price"]:
+        kb = types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("💳 Nạp ngay", callback_data="menu_deposit"),
+            types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home"))
+        show(call, f"⚠️ Thiếu {fmt(p['price']-u['balance'])}đ", kb); return
+
+    # === PROXY ===
+    if p["category"] == "Proxy":
+        ok, err, info = proxy_buy(uid, pid)
+        if not ok:
+            show(call, f"❌ {err}", back_markup("shop_home")); return
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+        line = (f"{info['protocol'].lower()}://{info['username']}:{info['password']}@{info['ip']}:{info['port']}"
+                if info['username'] else f"{info['protocol'].lower()}://{info['ip']}:{info['port']}")
+        txt = (f"<b>🎉 MUA PROXY OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-info['price'])}đ</b>\n\n"
+               f"<b>📦 {html.escape(info['name'])}</b>\n\n<blockquote>"
+               f"⏱ {info['days']} ngày | 📅 {info['expires_at']}\n"
+               f"🌐 <code>{info['ip']}:{info['port']}</code>\n")
+        if info['username']: txt += f"👤 <code>{info['username']}</code>\n"
+        if info['password']: txt += f"🔑 <code>{info['password']}</code>\n"
+        txt += f"</blockquote>\n\n<code>{html.escape(line)}</code>"
+        bot.send_message(call.message.chat.id, txt, reply_markup=
+            types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my")))
+        try: bot.send_message(cur_admin(), f"💰 Proxy mới: <code>{uid}</code> - {fmt(info['price'])}đ")
+        except: pass
+        return
+
+    # === DATA với API tự động ===
+    api_url = setting_get("data_api_url")
+    api_key = setting_get("data_api_key")
+    api_code = (p.get("api_product_code") or "").strip()
+    if p["category"] == "Data" and api_url and api_key and api_code:
+        ok, res = shop_buy(uid, pid)
+        if not ok:
+            show(call, f"❌ {res}", back_markup("shop_home")); return
+        method = setting_get("data_api_method", "POST")
+        success, data_str, err = data_api.call_ncc(api_url, api_key, api_code, 1,
+                                                    f"BOT{res['order_id']}", method)
+        if not success:
+            # Hoàn tiền
+            admin_add_money(uid, res['price'])
+            with db() as c:
+                c.execute("UPDATE orders SET status='refunded' WHERE id=?", (res['order_id'],))
+            show(call, f"❌ NCC báo lỗi:\n<code>{html.escape(str(err)[:250])}</code>\n\n"
+                       f"💸 Đã hoàn <b>{fmt(res['price'])}đ</b>",
+                 back_markup("shop_home"))
+            try: bot.send_message(cur_admin(),
+                f"⚠️ API Data lỗi đơn #{res['order_id']}:\n<code>{html.escape(str(err)[:200])}</code>")
+            except: pass
+            return
+        # Thành công → gửi data cho user
+        msg = (f"<b>🎉 MUA DATA THÀNH CÔNG!</b>\n\n<blockquote>"
+               f"🧾 #{res['order_id']}\n📦 {html.escape(res['name'])}\n"
+               f"💵 {fmt(res['price'])}đ\n🏦 Còn: <b>{fmt(u['balance']-res['price'])}đ</b></blockquote>\n\n"
+               f"<b>📄 Nội dung data:</b>\n<code>{html.escape(str(data_str)[:3000])}</code>")
+        kb = types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("🛍 Đơn của tôi", callback_data="shop_myorders"),
+            types.InlineKeyboardButton("🔙 Cửa Hàng", callback_data="shop_home"))
+        show(call, msg, kb)
+        with db() as c: c.execute("UPDATE orders SET status='delivered' WHERE id=?", (res['order_id'],))
+        try: bot.send_message(cur_admin(),
+            f"💰 DATA tự động #{res['order_id']} từ <code>{uid}</code> - {fmt(res['price'])}đ")
+        except: pass
+        return
+
+    # === SẢN PHẨM THƯỜNG (chờ admin xác nhận) ===
+    ok, res = shop_buy(uid, pid)
+    if not ok:
+        show(call, f"❌ {res}", back_markup("shop_home")); return
+    msg = (f"<b>🎉 ĐẶT HÀNG OK!</b>\n\n<blockquote>"
+           f"🧾 #{res['order_id']}\n📦 {html.escape(res['name'])}\n"
+           f"💵 {fmt(res['price'])}đ\n🏦 Còn: <b>{fmt(u['balance']-res['price'])}đ</b></blockquote>\n\n"
+           "⚠️ Chờ admin xác nhận giao hàng.")
+    kb = types.InlineKeyboardMarkup(row_width=1).add(
+        types.InlineKeyboardButton("🛍 Đơn của tôi", callback_data="shop_myorders"),
+        types.InlineKeyboardButton("🔙 Cửa Hàng", callback_data="shop_home"))
+    show(call, msg, kb)
+    try:
+        bot.send_message(cur_admin(),
+            f"🔔 ĐƠN MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
+    except: pass
+
 
 def register_all_handlers(bot):
     @bot.message_handler(commands=["start", "menu"])
@@ -857,8 +968,7 @@ def register_all_handlers(bot):
         user_states.pop(m.from_user.id, None)
         bot.send_message(m.chat.id, "✅ Đã hủy. /menu để mở menu.")
 
-    # ==== CALLBACK ROUTER (không nhận smm_ và adm_smm để nhường cho module SMM) ====
-    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_", "adm_smm")))
+    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_", "adm_smm", "adm_data")))
     def cb_router(call):
         data = call.data or ""
         if data == "noop":
@@ -870,347 +980,18 @@ def register_all_handlers(bot):
         is_admin = uid == cur_admin()
         try: bot.answer_callback_query(call.id)
         except: pass
-
-        # ============ MAIN ADMIN ============
-        if data == "adm_panel":
-            if not is_admin or is_child(): return
-            show(call, admin_text(), admin_markup())
-        elif data == "adm_bots":
-            if not is_admin or is_child(): return
-            _adm_bots_list(call)
-        elif data.startswith("adm_bot_view|"):
-            if not is_admin or is_child(): return
-            _adm_bot_view(call, int(data.split("|")[1]))
-        elif data.startswith("adm_bot_add30|"):
-            if not is_admin or is_child(): return
-            _adm_bot_add30(call, int(data.split("|")[1]))
-        elif data.startswith("adm_bot_stop|"):
-            if not is_admin or is_child(): return
-            _adm_bot_stop(call, int(data.split("|")[1]))
-        elif data.startswith("adm_bot_start|"):
-            if not is_admin or is_child(): return
-            _adm_bot_start(call, int(data.split("|")[1]))
-        elif data.startswith("adm_bot_del|"):
-            if not is_admin or is_child(): return
-            _adm_bot_del(call, int(data.split("|")[1]))
-        elif data == "adm_bots_clean":
-            if not is_admin or is_child(): return
-            _adm_bots_clean(call)
-        elif data == "adm_grant":
-            if not is_admin or is_child(): return
-            user_states[uid] = "ADMIN_GRANT"
-            show(call, "<b>💰 CẤP TIỀN</b>\n\nGửi: <code>&lt;uid hoặc @username&gt; số_tiền</code>\n"
-                       "Số âm để trừ. /cancel hủy.", back_markup("adm_panel"))
-        elif data == "adm_stats":
-            if not is_admin or is_child(): return
-            _adm_stats(call)
-        elif data == "adm_broadcast":
-            if not is_admin or is_child(): return
-            user_states[uid] = "ADMIN_BROADCAST"
-            show(call, "📣 Gửi tin nhắn để broadcast tất cả user. /cancel hủy.", back_markup("adm_panel"))
-        elif data == "adm_backup":
-            if not is_admin or is_child(): return
-            if not BACKUP_CHAT_ID:
-                show(call, "⚠️ Chưa set BACKUP_CHAT_ID.", back_markup("adm_panel")); return
-            show(call, "💾 Đang backup...", back_markup("adm_panel"))
-            bot.send_message(call.message.chat.id, "✅ Xong!" if backup_upload() else "❌ Lỗi!")
-        elif data == "adm_restore":
-            if not is_admin or is_child(): return
-            show(call, "🔄 Đang restore...", back_markup("adm_panel"))
-            if backup_restore():
-                init_db(MAIN_DB, is_main=True)
-                bot.send_message(call.message.chat.id, "✅ Đã khôi phục!")
-            else:
-                bot.send_message(call.message.chat.id, "❌ Không có backup!")
-        elif data == "adm_ui":
-            if not is_admin or is_child(): return
-            _adm_ui_show(call)
-        elif data.startswith("adm_ui_edit|"):
-            if not is_admin or is_child(): return
-            key = data.split("|", 1)[1]
-            user_states[uid] = f"ADMIN_EDIT_SETTING|{key}"
-            show(call, f"<b>SỬA: {key}</b>\n\nHiện tại: <blockquote>{html.escape(setting_get(key)[:300])}</blockquote>\n\n"
-                       f"Nhập mới. /cancel hủy.", back_markup("adm_ui"))
-        elif data == "adm_ui_reset":
-            if not is_admin or is_child(): return
-            for k, v in DEFAULT_SETTINGS.items(): setting_set(k, v)
-            show(call, "✅ Đã khôi phục mặc định.", back_markup("adm_ui"))
-
-        # ============ CHILD ADMIN ============
-        elif data == "cadm_panel":
-            if not is_admin or not is_child(): return
-            show(call, admin_text(), admin_markup())
-        elif data == "cadm_products":
-            if not is_admin or not is_child(): return
-            _cadm_products_list(call, 0)
-        elif data.startswith("cadm_prod_page|"):
-            if not is_admin or not is_child(): return
-            _cadm_products_list(call, int(data.split("|")[1]))
-        elif data.startswith("cadm_prod_view|"):
-            if not is_admin or not is_child(): return
-            _cadm_product_view(call, int(data.split("|")[1]))
-        elif data == "cadm_prod_add":
-            if not is_admin or not is_child(): return
-            user_states[uid] = "ADMIN_ADD_PRODUCT"
-            show(call, "➕ <b>THÊM SP</b>\n\n<code>Tên | giá | danh_mục | mô_tả</code>\n\n"
-                       "VD: <code>Data 100K | 100000 | Data | 30 ngày</code>\n\n/cancel hủy.",
-                 back_markup("cadm_products"))
-        elif data.startswith("cadm_prod_edit|"):
-            if not is_admin or not is_child(): return
-            _, pid, field = data.split("|")
-            user_states[uid] = f"ADMIN_EDIT_PRODUCT|{pid}|{field}"
-            p = shop_get(int(pid)); cur_v = ""
-            if p:
-                if field == "price": cur_v = fmt(p["price"]) + "đ"
-                elif field == "stock": cur_v = "Vô hạn" if p["stock"] < 0 else str(p["stock"])
-                else: cur_v = str(p.get(field, ""))[:300]
-            show(call, f"<b>✏️ SỬA {field}</b>\n\nHiện: <blockquote>{html.escape(cur_v)}</blockquote>\n\n"
-                       f"Nhập mới. /cancel hủy.", back_markup(f"cadm_prod_view|{pid}"))
-        elif data.startswith("cadm_prod_toggle|"):
-            if not is_admin or not is_child(): return
-            pid = int(data.split("|")[1])
-            with db() as c:
-                r = c.execute("SELECT active FROM products WHERE id=?", (pid,)).fetchone()
-                if r: c.execute("UPDATE products SET active=? WHERE id=?", (0 if r[0] else 1, pid))
-            _cadm_product_view(call, pid, "✅ Đã đổi")
-        elif data.startswith("cadm_prod_del|"):
-            if not is_admin or not is_child(): return
-            pid = int(data.split("|")[1])
-            kb = types.InlineKeyboardMarkup(row_width=2)
-            kb.add(types.InlineKeyboardButton("✅ XOÁ", callback_data=f"cadm_prod_delok|{pid}"),
-                   types.InlineKeyboardButton("❌ Hủy", callback_data=f"cadm_prod_view|{pid}"))
-            show(call, "⚠️ Xoá SP?", kb)
-        elif data.startswith("cadm_prod_delok|"):
-            if not is_admin or not is_child(): return
-            pid = int(data.split("|")[1])
-            with db() as c: c.execute("DELETE FROM products WHERE id=?", (pid,))
-            _cadm_products_list(call, 0)
-        elif data == "cadm_ipa":
-            if not is_admin or not is_child(): return
-            _cadm_ipa_list(call)
-        elif data == "cadm_ipa_add":
-            if not is_admin or not is_child(): return
-            user_states[uid] = "ADMIN_IPA_WAIT_FILE"
-            show(call, "📱 Gửi file .ipa (dạng document). /cancel hủy.", back_markup("cadm_ipa"))
-        elif data.startswith("cadm_ipa_view|"):
-            if not is_admin or not is_child(): return
-            _cadm_ipa_view(call, int(data.split("|")[1]))
-        elif data.startswith("cadm_ipa_del|"):
-            if not is_admin or not is_child(): return
-            pid = int(data.split("|")[1]); ipa_delete(pid)
-            _cadm_ipa_list(call, f"✅ Đã xoá #{pid}")
-        elif data == "cadm_proxy":
-            if not is_admin or not is_child(): return
-            s = proxy_count()
-            kb = types.InlineKeyboardMarkup(row_width=2)
-            kb.add(types.InlineKeyboardButton("➕ Nhập", callback_data="cadm_proxy_import"),
-                   types.InlineKeyboardButton("🧹 Dọn hết hạn", callback_data="cadm_proxy_clean"))
-            kb.add(types.InlineKeyboardButton("🔙 Admin", callback_data="cadm_panel"))
-            show(call, f"<b>🌐 PROXY</b>\n\n<blockquote>✅ {s['available']} | 💰 {s['sold']} | 📊 {s['total']}</blockquote>", kb)
-        elif data == "cadm_proxy_import":
-            if not is_admin or not is_child(): return
-            user_states[uid] = "ADMIN_IMPORT_PROXY"
-            show(call, "📥 Mỗi dòng: <code>ip:port:user:pass | KV | ISP | HTTP</code>\n\n/cancel hủy.",
-                 back_markup("cadm_proxy"))
-        elif data == "cadm_proxy_clean":
-            if not is_admin or not is_child(): return
-            now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with db() as c:
-                n = c.execute("DELETE FROM proxy_stock WHERE status='sold' AND expires_at!='' AND expires_at<?", (now_s,)).rowcount
-            show(call, f"✅ Xoá {n} proxy hết hạn.", back_markup("cadm_proxy"))
-        elif data == "cadm_grant":
-            if not is_admin or not is_child(): return
-            user_states[uid] = "ADMIN_GRANT"
-            show(call, "<b>💰 CẤP TIỀN</b>\n\nGửi: <code>&lt;uid&gt; số_tiền</code>\n\n/cancel hủy.",
-                 back_markup("cadm_panel"))
-        elif data == "cadm_stats":
-            if not is_admin or not is_child(): return
-            _adm_stats(call)
-        elif data == "cadm_settings":
-            if not is_admin or not is_child(): return
-            _cadm_settings(call)
-        elif data.startswith("cadm_set_edit|"):
-            if not is_admin or not is_child(): return
-            key = data.split("|", 1)[1]
-            user_states[uid] = f"ADMIN_EDIT_SETTING|{key}"
-            show(call, f"<b>SỬA {key}</b>\n\nHiện: <blockquote>{html.escape(setting_get(key)[:200])}</blockquote>\n\n"
-                       f"Nhập mới. /cancel hủy.", back_markup("cadm_settings"))
-        elif data == "cadm_broadcast":
-            if not is_admin or not is_child(): return
-            user_states[uid] = "ADMIN_BROADCAST"
-            show(call, "📣 Gửi tin nhắn broadcast. /cancel hủy.", back_markup("cadm_panel"))
-        elif data == "cadm_export":
-            if not is_admin or not is_child(): return
-            _cadm_export(call)
-
-        # ============ USER MENU ============
-        elif data == "menu_profile":
-            show(call, f"<b>📊 TÀI KHOẢN</b>\n\n<blockquote>"
-                       f"🆔 <code>{uid}</code>\n👤 {html.escape(call.from_user.first_name or 'Khách')}\n"
-                       f"🏦 Số dư: <b>{fmt(u['balance'])}đ</b>\n"
-                       f"🏆 Tổng nạp: <b>{fmt(u['total'])}đ</b>\n"
-                       f"📅 Tháng: <b>{fmt(u['month'])}đ</b></blockquote>", back_markup())
-        elif data == "menu_create_bot":
-            if is_child(): return
-            if not is_admin and u["balance"] < CREATE_BOT_FEE:
-                miss = CREATE_BOT_FEE - u["balance"]
-                kb = types.InlineKeyboardMarkup(row_width=1)
-                kb.add(types.InlineKeyboardButton("💳 Nạp ngay", callback_data="menu_deposit"),
-                       types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_back"))
-                show(call, f"<b>⚠️ THIẾU TIỀN</b>\n\n💰 Cần {fmt(CREATE_BOT_FEE)}đ\n🏦 Có {fmt(u['balance'])}đ\n"
-                           f"❌ Thiếu {fmt(miss)}đ", kb); return
-            user_states[uid] = "WAITING_BOT_TOKEN"
-            show(call, f"<b>🤖 THUÊ BOT</b>\n\n"
-                       f"💰 {fmt(CREATE_BOT_FEE)}đ/{BOT_RENT_DAYS} ngày\n"
-                       f"🔄 Gia hạn {fmt(BOT_RENEW_FEE)}đ/{BOT_RENT_DAYS} ngày\n\n"
-                       "1️⃣ Mở @BotFather → /newbot\n2️⃣ Copy token gửi vào đây:", back_markup())
-        elif data == "mybots":
-            if is_child(): return
-            _my_bots_list(call, u)
-        elif data.startswith("mybot_view|"):
-            if is_child(): return
-            _my_bot_view(call, int(data.split("|")[1]), u)
-        elif data.startswith("mybot_renew|"):
-            if is_child(): return
-            _my_bot_renew(call, int(data.split("|")[1]), u)
-        elif data == "menu_deposit":
-            kb = types.InlineKeyboardMarkup(row_width=3)
-            kb.add(*[types.InlineKeyboardButton(f"{a//1000}k", callback_data=f"dep|{a}")
-                     for a in (20000, 30000, 50000, 100000, 200000, 500000)])
-            kb.add(types.InlineKeyboardButton("✏️ Khác", callback_data="dep|0"),
-                   types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_back"))
-            show(call, "<b>💰 NẠP TIỀN</b>\n\nChọn số tiền:", kb)
-        elif data.startswith("dep|"):
-            amt = int(data.split("|")[1])
-            send_qr(call, amt, f"NAP{uid}", "💰 NẠP TIỀN",
-                    "⚡ Chuyển đúng nội dung, chờ admin xác nhận.")
-        elif data == "menu_donate":
-            if is_child(): return
-            send_qr(call, 0, f"DONATE{uid}", "❤️ DONATE", "🙏 Cảm ơn bạn!")
-        elif data == "menu_support":
-            show(call, f"<b>🎛️ HỖ TRỢ</b>\n\n{html.escape(setting_get('support_text'))}", back_markup())
-        elif data == "menu_back":
-            user_states.pop(uid, None)
-            show(call, home_text(u, is_admin), main_menu(uid))
-
-        # ============ SHOP ============
-        elif data == "shop_home":
-            show(call, shop_home_text(), shop_home_markup())
-        elif data.startswith("shop_view|"):
-            pid = int(data.split("|", 1)[1]); p = shop_get(pid)
-            if not p: show(call, "❌ Không tìm thấy.", back_markup("shop_home")); return
-            show(call, product_detail_text(p), product_markup(pid, p["stock"]))
-        elif data.startswith("shop_buy|"):
-            pid = int(data.split("|", 1)[1]); p = shop_get(pid)
-            if not p: show(call, "❌ Không tìm thấy.", back_markup("shop_home")); return
-            if u["balance"] < p["price"]:
-                kb = types.InlineKeyboardMarkup(row_width=1).add(
-                    types.InlineKeyboardButton("💳 Nạp ngay", callback_data="menu_deposit"),
-                    types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home"))
-                show(call, f"⚠️ Thiếu {fmt(p['price']-u['balance'])}đ", kb); return
-            # === PROXY ===
-            if p["category"] == "Proxy":
-                ok, err, info = proxy_buy(uid, pid)
-                if not ok:
-                    show(call, f"❌ {err}", back_markup("shop_home")); return
-                try: bot.delete_message(call.message.chat.id, call.message.message_id)
-                except: pass
-                line = (f"{info['protocol'].lower()}://{info['username']}:{info['password']}@{info['ip']}:{info['port']}"
-                        if info['username'] else f"{info['protocol'].lower()}://{info['ip']}:{info['port']}")
-                txt = (f"<b>🎉 MUA PROXY OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-info['price'])}đ</b>\n\n"
-                       f"<b>📦 {html.escape(info['name'])}</b>\n\n<blockquote>"
-                       f"⏱ {info['days']} ngày | 📅 {info['expires_at']}\n"
-                       f"🌐 <code>{info['ip']}:{info['port']}</code>\n")
-                if info['username']: txt += f"👤 <code>{info['username']}</code>\n"
-                if info['password']: txt += f"🔑 <code>{info['password']}</code>\n"
-                txt += f"</blockquote>\n\n<code>{html.escape(line)}</code>"
-                bot.send_message(call.message.chat.id, txt, reply_markup=
-                    types.InlineKeyboardMarkup().add(
-                        types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my")))
-                try: bot.send_message(cur_admin(), f"💰 Proxy mới: <code>{uid}</code> - {fmt(info['price'])}đ")
-                except: pass
-                return
-            # === SẢN PHẨM THƯỜNG ===
-            ok, res = shop_buy(uid, pid)
-            if not ok:
-                show(call, f"❌ {res}", back_markup("shop_home")); return
-            show(call,
-                f"<b>🎉 ĐẶT HÀNG OK!</b>\n\n<blockquote>"
-                f"🧾 #{res['order_id']}\n📦 {html.escape(res['name'])}\n"
-                f"💵 {fmt(res['price'])}đ\n🏦 Còn: <b>{fmt(u['balance']-res['price'])}đ</b></blockquote>\n\n"
-                "⚠️ Chờ admin xác nhận giao hàng.",
-                types.InlineKeyboardMarkup(row_width=1).add(
-                    types.InlineKeyboardButton("🛍 Đơn của tôi", callback_data="shop_myorders"),
-                    types.InlineKeyboardButton("🔙 Cửa Hàng", callback_data="shop_home")))
-            try:
-                bot.send_message(cur_admin(),
-                    f"🔔 ĐƠN MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
-            except: pass
-        elif data == "shop_myorders":
-            rows = shop_myorders(uid, 10)
-            if not rows: show(call, "🛍 Chưa có đơn.", back_markup("shop_home")); return
-            txt = "<b>🛍 ĐƠN HÀNG</b>\n\n<blockquote>"
-            for r in rows: txt += f"• #{r[0]} {html.escape(r[1])} – {fmt(r[2])}đ\n"
-            txt += "</blockquote>"
-            show(call, txt, back_markup("shop_home"))
-
-        # ============ IPA ============
-        elif data == "ipa_home":
-            items = ipa_list(limit=40)
-            if not items:
-                show(call, "<b>📱 KHO IPA</b>\n\nKho trống, chờ admin thêm!", back_markup("menu_back")); return
-            kb = types.InlineKeyboardMarkup(row_width=1)
-            for it in items:
-                kb.add(types.InlineKeyboardButton(f"📱 {it['name'][:45]} ({it['downloads']} ⬇️)",
-                       callback_data=f"ipa_dl|{it['id']}"))
-            kb.add(types.InlineKeyboardButton("🔙 Menu", callback_data="menu_back"))
-            show(call, f"<b>📱 KHO IPA</b>\n\n🎁 {len(items)} app miễn phí\n👇 Bấm để tải:", kb)
-        elif data.startswith("ipa_dl|"):
-            pid = int(data.split("|", 1)[1]); it = ipa_get(pid)
-            if not it: show(call, "❌ Không tìm thấy.", back_markup("ipa_home")); return
-            try: bot.send_chat_action(call.message.chat.id, "upload_document")
+        try:
+            _dispatch(bot, call, data, uid, u, is_admin)
+        except Exception as e:
+            log.exception("cb_router error [%s]: %s", data, e)
+            try: bot.answer_callback_query(call.id, f"❌ Lỗi: {str(e)[:100]}", show_alert=True)
             except: pass
             try:
-                bot.send_document(call.message.chat.id, it["file_id"],
-                    caption=f"<b>📱 {html.escape(it['name'])}</b>\n\n{html.escape(it['description'][:200])}")
-                ipa_inc(pid)
-            except Exception as e:
-                log.warning("send ipa: %s", e)
-                bot.send_message(call.message.chat.id, "❌ Không gửi được file.")
+                bot.send_message(call.message.chat.id,
+                    f"❌ Có lỗi xử lý: <code>{html.escape(str(e)[:200])}</code>",
+                    reply_markup=back_markup("menu_back"))
+            except: pass
 
-        # ============ PROXY ============
-        elif data == "proxy_my":
-            rows = proxy_my(uid)
-            if not rows:
-                show(call, "<b>🌐 PROXY CỦA TÔI</b>\n\nChưa mua proxy.",
-                     types.InlineKeyboardMarkup(row_width=1).add(
-                         types.InlineKeyboardButton("🛒 Shop", callback_data="shop_home"),
-                         types.InlineKeyboardButton("🔙 Menu", callback_data="menu_back"))); return
-            act = sum(1 for r in rows if r["status"] == "active")
-            kb = types.InlineKeyboardMarkup(row_width=1)
-            for r in rows[:10]:
-                icon = "🟢" if r["status"] == "active" else "🔴"
-                kb.add(types.InlineKeyboardButton(f"{icon} {r['ip']}:{r['port']} ({r['protocol']})",
-                       callback_data=f"proxy_view|{r['id']}"))
-            kb.add(types.InlineKeyboardButton("🔙 Menu", callback_data="menu_back"))
-            show(call, f"<b>🌐 PROXY CỦA TÔI</b>\n\n🟢 {act} còn hạn / {len(rows)-act} hết hạn", kb)
-        elif data.startswith("proxy_view|"):
-            pid = int(data.split("|", 1)[1])
-            with db() as c:
-                r = c.execute("SELECT ip,port,username,password,protocol,region,isp,expires_at FROM proxy_stock WHERE id=? AND sold_to=?",
-                              (pid, uid)).fetchone()
-            if not r: show(call, "❌ Không tìm thấy.", back_markup("proxy_my")); return
-            now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            act = r[7] and r[7] > now_s
-            line = (f"{r[4].lower()}://{r[2]}:{r[3]}@{r[0]}:{r[1]}" if r[2]
-                    else f"{r[4].lower()}://{r[0]}:{r[1]}")
-            txt = (f"<b>🌐 PROXY</b>\n\n<blockquote>"
-                   f"Trạng thái: <b>{'🟢 Còn hạn' if act else '🔴 Hết hạn'}</b>\n"
-                   f"📅 {r[7]}\n🌐 <code>{r[0]}:{r[1]}</code>\n")
-            if r[2]: txt += f"👤 <code>{r[2]}</code>\n"
-            if r[3]: txt += f"🔑 <code>{r[3]}</code>\n"
-            txt += f"📡 {r[4]}</blockquote>\n\n<code>{html.escape(line)}</code>"
-            show(call, txt, back_markup("proxy_my"))
 
     # ============ STATE MESSAGE HANDLERS ============
     @bot.message_handler(func=lambda m: m.from_user is not None and
@@ -1331,7 +1112,7 @@ def register_all_handlers(bot):
             try: val = int(raw)
             except: bot.reply_to(m, "❌ Phải là số"); return
         else: val = raw
-        if field not in ("name","description","price","category","stock"):
+        if field not in ("name","description","price","category","stock","api_product_code"):
             user_states.pop(m.from_user.id, None); return
         with db() as c: c.execute(f"UPDATE products SET {field}=? WHERE id=?", (val, pid))
         user_states.pop(m.from_user.id, None)
@@ -1376,13 +1157,321 @@ def register_all_handlers(bot):
         except Exception as e:
             log.exception("AI: %s", e); bot.reply_to(m, "🤖 Bot bận!")
 
-    # ==== SMM cuối cùng ====
+    # SMM
     smm.register(bot, {
         "db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
         "get_user": get_or_create_user, "show": show,
         "back_markup": back_markup, "user_states": user_states,
     })
+    # DATA API
+    data_api.register(bot, {
+        "db_path_fn": cur_db, "cur_admin": cur_admin,
+        "show": show, "back_markup": back_markup, "user_states": user_states,
+    })
 
+
+# ══════════════ DISPATCH (tất cả nút của menu chính) ══════════════
+def _dispatch(bot, call, data, uid, u, is_admin):
+    # ---- MAIN ADMIN ----
+    if data == "adm_panel":
+        if not is_admin or is_child(): return
+        show(call, admin_text(), admin_markup())
+    elif data == "adm_bots":
+        if not is_admin or is_child(): return
+        _adm_bots_list(call)
+    elif data.startswith("adm_bot_view|"):
+        if not is_admin or is_child(): return
+        _adm_bot_view(call, int(data.split("|")[1]))
+    elif data.startswith("adm_bot_add30|"):
+        if not is_admin or is_child(): return
+        _adm_bot_add30(call, int(data.split("|")[1]))
+    elif data.startswith("adm_bot_stop|"):
+        if not is_admin or is_child(): return
+        _adm_bot_stop(call, int(data.split("|")[1]))
+    elif data.startswith("adm_bot_start|"):
+        if not is_admin or is_child(): return
+        _adm_bot_start(call, int(data.split("|")[1]))
+    elif data.startswith("adm_bot_del|"):
+        if not is_admin or is_child(): return
+        _adm_bot_del(call, int(data.split("|")[1]))
+    elif data == "adm_bots_clean":
+        if not is_admin or is_child(): return
+        _adm_bots_clean(call)
+    elif data == "adm_grant":
+        if not is_admin or is_child(): return
+        user_states[uid] = "ADMIN_GRANT"
+        show(call, "<b>💰 CẤP TIỀN</b>\n\nGửi: <code>&lt;uid hoặc @username&gt; số_tiền</code>\n"
+                   "Số âm để trừ. /cancel hủy.", back_markup("adm_panel"))
+    elif data == "adm_stats":
+        if not is_admin or is_child(): return
+        _adm_stats(call)
+    elif data == "adm_broadcast":
+        if not is_admin or is_child(): return
+        user_states[uid] = "ADMIN_BROADCAST"
+        show(call, "📣 Gửi tin nhắn để broadcast tất cả user. /cancel hủy.", back_markup("adm_panel"))
+    elif data == "adm_backup":
+        if not is_admin or is_child(): return
+        if not BACKUP_CHAT_ID:
+            show(call, "⚠️ Chưa set BACKUP_CHAT_ID.", back_markup("adm_panel")); return
+        show(call, "💾 Đang backup...", back_markup("adm_panel"))
+        bot.send_message(call.message.chat.id, "✅ Xong!" if backup_upload() else "❌ Lỗi!")
+    elif data == "adm_restore":
+        if not is_admin or is_child(): return
+        show(call, "🔄 Đang restore...", back_markup("adm_panel"))
+        if backup_restore():
+            init_db(MAIN_DB, is_main=True)
+            bot.send_message(call.message.chat.id, "✅ Đã khôi phục!")
+        else:
+            bot.send_message(call.message.chat.id, "❌ Không có backup!")
+    elif data == "adm_ui":
+        if not is_admin or is_child(): return
+        _adm_ui_show(call)
+    elif data.startswith("adm_ui_edit|"):
+        if not is_admin or is_child(): return
+        key = data.split("|", 1)[1]
+        user_states[uid] = f"ADMIN_EDIT_SETTING|{key}"
+        show(call, f"<b>SỬA: {key}</b>\n\nHiện: <blockquote>{html.escape(setting_get(key)[:300])}</blockquote>\n\n"
+                   f"Nhập mới. /cancel hủy.", back_markup("adm_ui"))
+    elif data == "adm_ui_reset":
+        if not is_admin or is_child(): return
+        for k, v in DEFAULT_SETTINGS.items(): setting_set(k, v)
+        show(call, "✅ Đã khôi phục mặc định.", back_markup("adm_ui"))
+
+    # ---- CHILD ADMIN ----
+    elif data == "cadm_panel":
+        if not is_admin or not is_child(): return
+        show(call, admin_text(), admin_markup())
+    elif data == "cadm_products":
+        if not is_admin or not is_child(): return
+        _cadm_products_list(call, 0)
+    elif data.startswith("cadm_prod_page|"):
+        if not is_admin or not is_child(): return
+        _cadm_products_list(call, int(data.split("|")[1]))
+    elif data.startswith("cadm_prod_view|"):
+        if not is_admin or not is_child(): return
+        _cadm_product_view(call, int(data.split("|")[1]))
+    elif data == "cadm_prod_add":
+        if not is_admin or not is_child(): return
+        user_states[uid] = "ADMIN_ADD_PRODUCT"
+        show(call, "➕ <b>THÊM SP</b>\n\n<code>Tên | giá | danh_mục | mô_tả</code>\n\n"
+                   "VD: <code>Data 100K | 100000 | Data | 30 ngày</code>\n\n/cancel hủy.",
+             back_markup("cadm_products"))
+    elif data.startswith("cadm_prod_edit|"):
+        if not is_admin or not is_child(): return
+        _, pid, field = data.split("|")
+        user_states[uid] = f"ADMIN_EDIT_PRODUCT|{pid}|{field}"
+        p = shop_get(int(pid)); cur_v = ""
+        if p:
+            if field == "price": cur_v = fmt(p["price"]) + "đ"
+            elif field == "stock": cur_v = "Vô hạn" if p["stock"] < 0 else str(p["stock"])
+            elif field == "api_product_code": cur_v = p.get("api_product_code") or "(trống — dùng cho API Data)"
+            else: cur_v = str(p.get(field, ""))[:300]
+        show(call, f"<b>✏️ SỬA {field}</b>\n\nHiện: <blockquote>{html.escape(cur_v)}</blockquote>\n\n"
+                   f"Nhập mới. /cancel hủy.", back_markup(f"cadm_prod_view|{pid}"))
+    elif data.startswith("cadm_prod_toggle|"):
+        if not is_admin or not is_child(): return
+        pid = int(data.split("|")[1])
+        with db() as c:
+            r = c.execute("SELECT active FROM products WHERE id=?", (pid,)).fetchone()
+            if r: c.execute("UPDATE products SET active=? WHERE id=?", (0 if r[0] else 1, pid))
+        _cadm_product_view(call, pid, "✅ Đã đổi")
+    elif data.startswith("cadm_prod_del|"):
+        if not is_admin or not is_child(): return
+        pid = int(data.split("|")[1])
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("✅ XOÁ", callback_data=f"cadm_prod_delok|{pid}"),
+               types.InlineKeyboardButton("❌ Hủy", callback_data=f"cadm_prod_view|{pid}"))
+        show(call, "⚠️ Xoá SP?", kb)
+    elif data.startswith("cadm_prod_delok|"):
+        if not is_admin or not is_child(): return
+        pid = int(data.split("|")[1])
+        with db() as c: c.execute("DELETE FROM products WHERE id=?", (pid,))
+        _cadm_products_list(call, 0)
+    elif data == "cadm_ipa":
+        if not is_admin or not is_child(): return
+        _cadm_ipa_list(call)
+    elif data == "cadm_ipa_add":
+        if not is_admin or not is_child(): return
+        user_states[uid] = "ADMIN_IPA_WAIT_FILE"
+        show(call, "📱 Gửi file .ipa (dạng document). /cancel hủy.", back_markup("cadm_ipa"))
+    elif data.startswith("cadm_ipa_view|"):
+        if not is_admin or not is_child(): return
+        _cadm_ipa_view(call, int(data.split("|")[1]))
+    elif data.startswith("cadm_ipa_del|"):
+        if not is_admin or not is_child(): return
+        pid = int(data.split("|")[1]); ipa_delete(pid)
+        _cadm_ipa_list(call, f"✅ Đã xoá #{pid}")
+    elif data == "cadm_proxy":
+        if not is_admin or not is_child(): return
+        s = proxy_count()
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("➕ Nhập", callback_data="cadm_proxy_import"),
+               types.InlineKeyboardButton("🧹 Dọn hết hạn", callback_data="cadm_proxy_clean"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin", callback_data="cadm_panel"))
+        show(call, f"<b>🌐 PROXY</b>\n\n<blockquote>✅ {s['available']} | 💰 {s['sold']} | 📊 {s['total']}</blockquote>", kb)
+    elif data == "cadm_proxy_import":
+        if not is_admin or not is_child(): return
+        user_states[uid] = "ADMIN_IMPORT_PROXY"
+        show(call, "📥 Mỗi dòng: <code>ip:port:user:pass | KV | ISP | HTTP</code>\n\n/cancel hủy.",
+             back_markup("cadm_proxy"))
+    elif data == "cadm_proxy_clean":
+        if not is_admin or not is_child(): return
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with db() as c:
+            n = c.execute("DELETE FROM proxy_stock WHERE status='sold' AND expires_at!='' AND expires_at<?", (now_s,)).rowcount
+        show(call, f"✅ Xoá {n} proxy hết hạn.", back_markup("cadm_proxy"))
+    elif data == "cadm_grant":
+        if not is_admin or not is_child(): return
+        user_states[uid] = "ADMIN_GRANT"
+        show(call, "<b>💰 CẤP TIỀN</b>\n\nGửi: <code>&lt;uid&gt; số_tiền</code>\n\n/cancel hủy.",
+             back_markup("cadm_panel"))
+    elif data == "cadm_stats":
+        if not is_admin or not is_child(): return
+        _adm_stats(call)
+    elif data == "cadm_settings":
+        if not is_admin or not is_child(): return
+        _cadm_settings(call)
+    elif data.startswith("cadm_set_edit|"):
+        if not is_admin or not is_child(): return
+        key = data.split("|", 1)[1]
+        user_states[uid] = f"ADMIN_EDIT_SETTING|{key}"
+        show(call, f"<b>SỬA {key}</b>\n\nHiện: <blockquote>{html.escape(setting_get(key)[:200])}</blockquote>\n\n"
+                   f"Nhập mới. /cancel hủy.", back_markup("cadm_settings"))
+    elif data == "cadm_broadcast":
+        if not is_admin or not is_child(): return
+        user_states[uid] = "ADMIN_BROADCAST"
+        show(call, "📣 Gửi tin nhắn broadcast. /cancel hủy.", back_markup("cadm_panel"))
+    elif data == "cadm_export":
+        if not is_admin or not is_child(): return
+        _cadm_export(call)
+
+    # ---- USER MENU ----
+    elif data == "menu_profile":
+        show(call, f"<b>📊 TÀI KHOẢN</b>\n\n<blockquote>"
+                   f"🆔 <code>{uid}</code>\n👤 {html.escape(call.from_user.first_name or 'Khách')}\n"
+                   f"🏦 Số dư: <b>{fmt(u['balance'])}đ</b>\n"
+                   f"🏆 Tổng nạp: <b>{fmt(u['total'])}đ</b>\n"
+                   f"📅 Tháng: <b>{fmt(u['month'])}đ</b></blockquote>", back_markup())
+    elif data == "menu_create_bot":
+        if is_child(): return
+        if not is_admin and u["balance"] < CREATE_BOT_FEE:
+            miss = CREATE_BOT_FEE - u["balance"]
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(types.InlineKeyboardButton("💳 Nạp ngay", callback_data="menu_deposit"),
+                   types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_back"))
+            show(call, f"<b>⚠️ THIẾU TIỀN</b>\n\n💰 Cần {fmt(CREATE_BOT_FEE)}đ\n🏦 Có {fmt(u['balance'])}đ\n"
+                       f"❌ Thiếu {fmt(miss)}đ", kb); return
+        user_states[uid] = "WAITING_BOT_TOKEN"
+        show(call, f"<b>🤖 THUÊ BOT</b>\n\n"
+                   f"💰 {fmt(CREATE_BOT_FEE)}đ/{BOT_RENT_DAYS} ngày\n"
+                   f"🔄 Gia hạn {fmt(BOT_RENEW_FEE)}đ/{BOT_RENT_DAYS} ngày\n\n"
+                   "1️⃣ Mở @BotFather → /newbot\n2️⃣ Copy token gửi vào đây:", back_markup())
+    elif data == "mybots":
+        if is_child(): return
+        _my_bots_list(call, u)
+    elif data.startswith("mybot_view|"):
+        if is_child(): return
+        _my_bot_view(call, int(data.split("|")[1]), u)
+    elif data.startswith("mybot_renew|"):
+        if is_child(): return
+        _my_bot_renew(call, int(data.split("|")[1]), u)
+    elif data == "menu_deposit":
+        kb = types.InlineKeyboardMarkup(row_width=3)
+        kb.add(*[types.InlineKeyboardButton(f"{a//1000}k", callback_data=f"dep|{a}")
+                 for a in (20000, 30000, 50000, 100000, 200000, 500000)])
+        kb.add(types.InlineKeyboardButton("✏️ Khác", callback_data="dep|0"),
+               types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_back"))
+        show(call, "<b>💰 NẠP TIỀN</b>\n\nChọn số tiền:", kb)
+    elif data.startswith("dep|"):
+        amt = int(data.split("|")[1])
+        send_qr(call, amt, f"NAP{uid}", "💰 NẠP TIỀN",
+                "⚡ Chuyển đúng nội dung, chờ admin xác nhận.")
+    elif data == "menu_donate":
+        if is_child(): return
+        send_qr(call, 0, f"DONATE{uid}", "❤️ DONATE", "🙏 Cảm ơn bạn!")
+    elif data == "menu_support":
+        show(call, f"<b>🎛️ HỖ TRỢ</b>\n\n{html.escape(setting_get('support_text'))}", back_markup())
+    elif data == "menu_back":
+        user_states.pop(uid, None)
+        show(call, home_text(u, is_admin), main_menu(uid))
+
+    # ---- SHOP ----
+    elif data == "shop_home":
+        show(call, shop_home_text(), shop_home_markup())
+    elif data.startswith("shop_view|"):
+        pid = int(data.split("|", 1)[1]); p = shop_get(pid)
+        if not p: show(call, "❌ Không tìm thấy.", back_markup("shop_home")); return
+        show(call, product_detail_text(p), product_markup(pid, p["stock"]))
+    elif data.startswith("shop_buy|"):
+        _handle_shop_buy(bot, call, data, uid, u)
+    elif data == "shop_myorders":
+        rows = shop_myorders(uid, 10)
+        if not rows: show(call, "🛍 Chưa có đơn.", back_markup("shop_home")); return
+        txt = "<b>🛍 ĐƠN HÀNG</b>\n\n<blockquote>"
+        for r in rows: txt += f"• #{r[0]} {html.escape(r[1])} – {fmt(r[2])}đ\n"
+        txt += "</blockquote>"
+        show(call, txt, back_markup("shop_home"))
+
+    # ---- IPA ----
+    elif data == "ipa_home":
+        items = ipa_list(limit=40)
+        if not items:
+            show(call, "<b>📱 KHO IPA</b>\n\nKho trống, chờ admin thêm!", back_markup("menu_back")); return
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for it in items:
+            kb.add(types.InlineKeyboardButton(f"📱 {it['name'][:45]} ({it['downloads']} ⬇️)",
+                   callback_data=f"ipa_dl|{it['id']}"))
+        kb.add(types.InlineKeyboardButton("🔙 Menu", callback_data="menu_back"))
+        show(call, f"<b>📱 KHO IPA</b>\n\n🎁 {len(items)} app miễn phí\n👇 Bấm để tải:", kb)
+    elif data.startswith("ipa_dl|"):
+        pid = int(data.split("|", 1)[1]); it = ipa_get(pid)
+        if not it: show(call, "❌ Không tìm thấy.", back_markup("ipa_home")); return
+        try: bot.send_chat_action(call.message.chat.id, "upload_document")
+        except: pass
+        try:
+            bot.send_document(call.message.chat.id, it["file_id"],
+                caption=f"<b>📱 {html.escape(it['name'])}</b>\n\n{html.escape(it['description'][:200])}")
+            ipa_inc(pid)
+        except Exception as e:
+            log.warning("send ipa: %s", e)
+            bot.send_message(call.message.chat.id, "❌ Không gửi được file.")
+
+    # ---- PROXY ----
+    elif data == "proxy_my":
+        rows = proxy_my(uid)
+        if not rows:
+            show(call, "<b>🌐 PROXY CỦA TÔI</b>\n\nChưa mua proxy.",
+                 types.InlineKeyboardMarkup(row_width=1).add(
+                     types.InlineKeyboardButton("🛒 Shop", callback_data="shop_home"),
+                     types.InlineKeyboardButton("🔙 Menu", callback_data="menu_back"))); return
+        act = sum(1 for r in rows if r["status"] == "active")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for r in rows[:10]:
+            icon = "🟢" if r["status"] == "active" else "🔴"
+            kb.add(types.InlineKeyboardButton(f"{icon} {r['ip']}:{r['port']} ({r['protocol']})",
+                   callback_data=f"proxy_view|{r['id']}"))
+        kb.add(types.InlineKeyboardButton("🔙 Menu", callback_data="menu_back"))
+        show(call, f"<b>🌐 PROXY CỦA TÔI</b>\n\n🟢 {act} còn hạn / {len(rows)-act} hết hạn", kb)
+    elif data.startswith("proxy_view|"):
+        pid = int(data.split("|", 1)[1])
+        with db() as c:
+            r = c.execute("SELECT ip,port,username,password,protocol,region,isp,expires_at FROM proxy_stock WHERE id=? AND sold_to=?",
+                          (pid, uid)).fetchone()
+        if not r: show(call, "❌ Không tìm thấy.", back_markup("proxy_my")); return
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        act = r[7] and r[7] > now_s
+        line = (f"{r[4].lower()}://{r[2]}:{r[3]}@{r[0]}:{r[1]}" if r[2]
+                else f"{r[4].lower()}://{r[0]}:{r[1]}")
+        txt = (f"<b>🌐 PROXY</b>\n\n<blockquote>"
+               f"Trạng thái: <b>{'🟢 Còn hạn' if act else '🔴 Hết hạn'}</b>\n"
+               f"📅 {r[7]}\n🌐 <code>{r[0]}:{r[1]}</code>\n")
+        if r[2]: txt += f"👤 <code>{r[2]}</code>\n"
+        if r[3]: txt += f"🔑 <code>{r[3]}</code>\n"
+        txt += f"📡 {r[4]}</blockquote>\n\n<code>{html.escape(line)}</code>"
+        show(call, txt, back_markup("proxy_my"))
+
+
+# ══════════════ ADMIN HELPERS ══════════════
 def _adm_bots_list(call):
     with sqlite3.connect(MAIN_DB) as c:
         rows = c.execute("SELECT id,user_id,bot_username,status,expires_at FROM user_bots ORDER BY id DESC LIMIT 50").fetchall()
@@ -1505,15 +1594,19 @@ def _cadm_product_view(call, pid, note=""):
     if not p: show(call, "❌ Không thấy.", back_markup("cadm_products")); return
     st = "♾️" if p["stock"] < 0 else ("Hết" if p["stock"] == 0 else str(p["stock"]))
     status = "✅" if p["active"] else "⛔"
+    api_code = (p.get("api_product_code") or "").strip() or "—"
     txt = (f"<b>📦 SP #{pid}</b>\n\n" + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
            + f"<blockquote>📝 <b>{html.escape(p['name'])}</b>\n💵 {fmt(p['price'])}đ\n"
-           f"📂 {html.escape(p['category'])}\n📊 Tồn: {st} | 🔥 {p['sold']}\n🔖 {status}</blockquote>")
+           f"📂 {html.escape(p['category'])}\n🔗 Mã NCC: <code>{html.escape(api_code)}</code>\n"
+           f"📊 Tồn: {st} | 🔥 {p['sold']}\n🔖 {status}</blockquote>")
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("✏️ Tên", callback_data=f"cadm_prod_edit|{pid}|name"),
            types.InlineKeyboardButton("💵 Giá", callback_data=f"cadm_prod_edit|{pid}|price"))
     kb.add(types.InlineKeyboardButton("📂 DM", callback_data=f"cadm_prod_edit|{pid}|category"),
            types.InlineKeyboardButton("📊 Tồn", callback_data=f"cadm_prod_edit|{pid}|stock"))
     kb.add(types.InlineKeyboardButton("📝 Mô tả", callback_data=f"cadm_prod_edit|{pid}|description"))
+    kb.add(types.InlineKeyboardButton("🔗 Mã NCC (API Data)",
+           callback_data=f"cadm_prod_edit|{pid}|api_product_code"))
     kb.add(types.InlineKeyboardButton("⛔ Tắt" if p["active"] else "✅ Bật",
            callback_data=f"cadm_prod_toggle|{pid}"))
     kb.add(types.InlineKeyboardButton("🗑️ XOÁ", callback_data=f"cadm_prod_del|{pid}"),
@@ -1635,8 +1728,7 @@ def adm_cmd(m):
     if m.from_user.id != ADMIN_ID: return
     cmd = m.text.split()[0].split("@")[0].lower()
     parts = m.text.split(maxsplit=2)
-    _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False
-    _ctx.bot_instance = main_bot
+    _ctx.db_path = MAIN_DB; _ctx.admin_id = ADMIN_ID; _ctx.is_child = False; _ctx.bot_instance = main_bot
     if cmd == "/admin":
         main_bot.send_message(m.chat.id, admin_text(), reply_markup=admin_markup())
     elif cmd == "/addmoney":
@@ -1725,7 +1817,6 @@ def sepay_webhook():
 
 @app.route("/")
 def home(): return "Bot Active", 200
-
 @app.route("/health")
 def health(): return "ok", 200
 
