@@ -132,6 +132,14 @@ def platforms_available(p):
     rows = _q(p, "SELECT DISTINCT platform FROM smm_services WHERE active=1", fetch="all")
     return [r[0] for r in rows] or []
 
+def svc_count(p):
+    try:
+        r = _q(p, "SELECT COUNT(*) FROM smm_services", fetch="one")
+        return r[0] if r else 0
+    except Exception as e:
+        log.warning("svc_count err: %s", e)
+        return -1
+
 def order_create(p, uid, svc, link, qty, price, api_o, st="pending"):
     return _q(p, "INSERT INTO smm_orders (user_id,service_id,service_name,platform,link,quantity,price,api_order,status) "
                  "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -351,7 +359,7 @@ def register(bot, h):
     # ===== ADMIN =====
     def _adm_menu(call, note=""):
         bp = dbp()
-        n = len(svc_list(bp, only_active=False))
+        n = svc_count(bp)
         api_url = cfg_get(bp, "smm_api_url", "—") or "—"
         key = cfg_get(bp, "smm_api_key", "")
         kd = (key[:6]+"***") if len(key)>10 else ("(chưa set)" if not key else "***")
@@ -370,6 +378,7 @@ def register(bot, h):
               types.InlineKeyboardButton("🔍 Debug API", callback_data="adm_smm_debug"),
               types.InlineKeyboardButton("📦 DS dịch vụ", callback_data="adm_smm_list"),
               types.InlineKeyboardButton("➕ Thêm thủ công", callback_data="adm_smm_add"),
+              types.InlineKeyboardButton("🧹 Xóa HẾT dịch vụ", callback_data="adm_smm_wipe"),
               types.InlineKeyboardButton("🧾 Đơn hàng", callback_data="adm_smm_orders"),
               types.InlineKeyboardButton("💵 Số dư API", callback_data="adm_smm_bal"),
               types.InlineKeyboardButton("🔙 Admin", callback_data="adm_panel"))
@@ -434,6 +443,24 @@ def register(bot, h):
         show(call, f"<b>💰 SỐ DƯ API</b>\n\n<blockquote>{html.escape(str(api_balance(dbp()))[:300])}</blockquote>",
              back_markup("adm_smm"))
 
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_wipe")
+    def _wipe(call):
+        if call.from_user.id != cur_admin(): return
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("✅ XOÁ HẾT", callback_data="adm_smm_wipeok"),
+               types.InlineKeyboardButton("❌ Hủy", callback_data="adm_smm"))
+        show(call, "⚠️ <b>XOÁ TẤT CẢ DỊCH VỤ?</b>\n\n"
+                   "Sau khi xoá, bấm <b>🔄 Sync từ API</b> để nạp lại.", kb)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_wipeok")
+    def _wipeok(call):
+        if call.from_user.id != cur_admin(): return
+        bp = dbp()
+        n = svc_count(bp)
+        try: _q(bp, "DELETE FROM smm_services")
+        except Exception as e: log.warning("wipe err: %s", e)
+        _adm_menu(call, f"✅ Đã xoá {n} dịch vụ. Bấm 🔄 Sync từ API.")
+
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_debug")
     def _debug(call):
         if call.from_user.id != cur_admin(): return
@@ -444,12 +471,20 @@ def register(bot, h):
         url = cfg_get(bp, "smm_api_url", "(trống)")
         key = cfg_get(bp, "smm_api_key", "")
         kd = (key[:8] + "***") if len(key) > 10 else ("(trống)" if not key else "***")
+        # Kiểm tra thêm: parsed là list hay dict?
+        if isinstance(parsed, list):
+            info = f"📊 LIST có {len(parsed)} phần tử"
+            if parsed: info += f"\n🔍 Item[0] type: {type(parsed[0]).__name__}"
+        elif isinstance(parsed, dict):
+            info = f"📊 DICT có {len(parsed)} keys: {list(parsed.keys())[:5]}"
+        else:
+            info = f"📊 Type: {type(parsed).__name__}"
         txt = (f"<b>🔍 DEBUG API</b>\n\n<blockquote>"
                f"🔗 URL: <code>{html.escape(url)}</code>\n"
                f"🔑 Key: <code>{html.escape(kd)}</code>\n"
                f"📡 HTTP: <b>{code}</b></blockquote>\n\n"
-               f"<b>📄 Response raw:</b>\n<code>{html.escape(str(body)[:400])}</code>\n\n"
-               f"<b>🔍 Parsed:</b>\n<code>{html.escape(str(parsed)[:400])}</code>")
+               f"<b>📄 Response raw (300 ký tự đầu):</b>\n<code>{html.escape(str(body)[:300])}</code>\n\n"
+               f"<b>🔍 Parsed info:</b>\n<code>{html.escape(info)}</code>")
         show(call, txt, back_markup("adm_smm"))
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_sync")
@@ -463,21 +498,40 @@ def register(bot, h):
         resp = api_services(bp)
         if isinstance(resp, dict) and "error" in resp:
             show(call, f"❌ <b>API BÁO LỖI</b>\n\n<blockquote>"
-                       f"<code>{html.escape(str(resp['error'])[:300])}</code></blockquote>\n\n"
-                       "💡 Kiểm tra lại API Key hoặc liên hệ NCC.",
+                       f"<code>{html.escape(str(resp['error'])[:300])}</code></blockquote>",
                  back_markup("adm_smm")); return
         if not isinstance(resp, list):
-            err = str(resp)[:250]
-            show(call, f"❌ Lỗi API: <blockquote>{html.escape(err)}</blockquote>",
+            show(call, f"❌ API trả về kiểu <b>{type(resp).__name__}</b>, không phải LIST.\n\n"
+                       f"<code>{html.escape(str(resp)[:300])}</code>",
+                 back_markup("adm_smm")); return
+        if not resp:
+            show(call, "⚠️ API trả về danh sách <b>rỗng</b>.\n\n"
+                       "Có thể key không có quyền xem services.",
                  back_markup("adm_smm")); return
         rate = _get_rate(bp); markup = _get_markup(bp)
         added = 0; sk = 0
-        for s in resp:
+        errs = []
+        sample_type = type(resp[0]).__name__
+        for i, s in enumerate(resp):
             try:
-                api_id = str(s.get("service") or s.get("id") or "")
-                if not api_id: sk += 1; continue
-                if _q(bp, "SELECT 1 FROM smm_services WHERE api_service=?", (api_id,), "one"):
-                    sk += 1; continue
+                if not isinstance(s, dict):
+                    sk += 1
+                    if len(errs) < 5: errs.append(f"[{i}] item không phải dict")
+                    continue
+                api_id = str(s.get("service") or s.get("id") or "").strip()
+                if not api_id:
+                    sk += 1
+                    if len(errs) < 5: errs.append(f"[{i}] thiếu service id")
+                    continue
+                # Kiểm tra trùng
+                try:
+                    dup = _q(bp, "SELECT 1 FROM smm_services WHERE api_service=?", (api_id,), "one")
+                    if dup:
+                        sk += 1; continue
+                except Exception as e:
+                    sk += 1
+                    if len(errs) < 5: errs.append(f"[{i}] DB check: {str(e)[:60]}")
+                    continue
                 nm = str(s.get("name") or "Dịch vụ")[:80]
                 cat = str(s.get("category") or s.get("type") or "Khác")[:30]
                 pl = _normalize_platform(s.get("platform"), nm, cat)
@@ -486,13 +540,26 @@ def register(bot, h):
                 cost = int(round(rate_usd * rate))
                 price = int(round(cost * (1 + markup / 100.0)))
                 if price <= 0: price = 1000
-                mn = int(s.get("min") or 100); mx = int(s.get("max") or 100000)
+                try:
+                    mn = int(float(str(s.get("min") or 100).strip()))
+                except: mn = 100
+                try:
+                    mx = int(float(str(s.get("max") or 100000).strip()))
+                except: mx = 100000
                 svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
                 added += 1
-            except Exception as e: log.warning("sync: %s", e); sk += 1
-        show(call, f"✅ <b>SYNC XONG</b>\n\n➕ Thêm: <b>{added}</b>\n⏭ Bỏ qua: {sk}\n\n"
-                   f"💵 Tỷ giá: {fmt(rate)}đ/USD | 📈 Lãi: {markup}%\n"
-                   f"💡 Vào <b>DS dịch vụ</b> xem lại giá nếu cần.", back_markup("adm_smm"))
+            except Exception as e:
+                log.warning("sync err [%d]: %s | data=%s", i, e, str(s)[:150])
+                sk += 1
+                if len(errs) < 5: errs.append(f"[{i}] {str(e)[:80]}")
+        msg = (f"✅ <b>SYNC XONG</b>\n\n"
+               f"➕ Thêm: <b>{added}</b>\n⏭ Bỏ qua: {sk}\n"
+               f"📊 Item type: <b>{sample_type}</b>\n\n"
+               f"💵 Tỷ giá: {fmt(rate)}đ/USD | 📈 Lãi: {markup}%")
+        if errs:
+            msg += "\n\n<b>⚠️ 5 lỗi đầu:</b>\n"
+            for e in errs: msg += f"<code>{html.escape(e)}</code>\n"
+        show(call, msg, back_markup("adm_smm"))
 
     def _show_svc(call, page=0):
         bp = dbp(); svcs = svc_list(bp, only_active=False)
