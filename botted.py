@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """BOT TELEGRAM ĐA NĂNG - BẢN CUỐI (có Backup Telegram miễn phí)"""
-import os, io, re, time, html, hmac, sqlite3, logging, threading, urllib.parse
+import os, io, re, time, html, hmac, sqlite3, logging, threading, urllib.parse, random
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta
