@@ -76,7 +76,29 @@ def _api(p, action, **params):
     except Exception as e: return {"error": str(e)[:150]}
 
 def api_balance(p): return _api(p, "balance")
-def api_services(p): return _api(p, "services")
+def api_services(p):
+    url = cfg_get(p, "smm_api_url"); key = cfg_get(p, "smm_api_key")
+    if not url or not key: return {"error": "Chưa cấu hình API"}
+    try:
+        r = requests.post(url, data={"key": key, "action": "services"}, timeout=30)
+        log.info("SMM services raw: status=%s body=%s", r.status_code, r.text[:800])
+        if r.status_code != 200: return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        try: return r.json()
+        except: return {"error": f"Không phải JSON: {r.text[:200]}"}
+    except Exception as e: return {"error": str(e)[:200]}
+
+def api_debug(p):
+    """Trả về (status_code, body_text, parsed_or_error) để admin debug."""
+    url = cfg_get(p, "smm_api_url"); key = cfg_get(p, "smm_api_key")
+    if not url or not key: return 0, "", "Chưa cấu hình API"
+    try:
+        r = requests.post(url, data={"key": key, "action": "services"}, timeout=30)
+        body = r.text[:500]
+        try: parsed = r.json()
+        except: parsed = f"(không parse được JSON) {body[:200]}"
+        return r.status_code, body, parsed
+    except Exception as e:
+        return 0, "", str(e)[:200]
 def api_add(p, sid, link, qty): return _api(p, "add", service=sid, link=link, quantity=qty)
 def api_status(p, oid): return _api(p, "status", order=oid)
 
@@ -347,6 +369,7 @@ def register(bot, h):
         m.add(types.InlineKeyboardButton("⚙️ Cấu hình API", callback_data="adm_smm_cfg"),
               types.InlineKeyboardButton("💰 Giá & Lãi", callback_data="adm_smm_price"),
               types.InlineKeyboardButton("🔄 Sync từ API", callback_data="adm_smm_sync"),
+              types.InlineKeyboardButton("🔍 Debug API", callback_data="adm_smm_debug"),
               types.InlineKeyboardButton("📦 DS dịch vụ", callback_data="adm_smm_list"),
               types.InlineKeyboardButton("➕ Thêm thủ công", callback_data="adm_smm_add"),
               types.InlineKeyboardButton("🧾 Đơn hàng", callback_data="adm_smm_orders"),
@@ -412,6 +435,24 @@ def register(bot, h):
         if call.from_user.id != cur_admin(): return
         show(call, f"<b>💰 SỐ DƯ API</b>\n\n<blockquote>{html.escape(str(api_balance(dbp()))[:300])}</blockquote>",
              back_markup("adm_smm"))
+
+      @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_debug")
+    def _debug(call):
+        if call.from_user.id != cur_admin(): return
+        bp = dbp()
+        try: bot.answer_callback_query(call.id, "🔍 Đang test...")
+        except: pass
+        code, body, parsed = api_debug(bp)
+        url = cfg_get(bp, "smm_api_url", "(trống)")
+        key = cfg_get(bp, "smm_api_key", "")
+        kd = (key[:8] + "***") if len(key) > 10 else ("(trống)" if not key else "***")
+        txt = (f"<b>🔍 DEBUG API</b>\n\n<blockquote>"
+               f"🔗 URL: <code>{html.escape(url)}</code>\n"
+               f"🔑 Key: <code>{html.escape(kd)}</code>\n"
+               f"📡 HTTP: <b>{code}</b></blockquote>\n\n"
+               f"<b>📄 Response raw:</b>\n<code>{html.escape(str(body)[:400])}</code>\n\n"
+               f"<b>🔍 Parsed:</b>\n<code>{html.escape(str(parsed)[:400])}</code>")
+        show(call, txt, back_markup("adm_smm"))
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_sync")
     def _sync(call):
