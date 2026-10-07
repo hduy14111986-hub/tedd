@@ -1232,7 +1232,9 @@ def register_all_handlers(bot):
         user_states.pop(m.from_user.id, None)
         bot.reply_to(m, f"✅ Đã sửa <b>{key}</b>.")
 
-    @bot.message_handler(func=lambda m: bool(m.text) and m.chat.type == "private" and not m.text.startswith("/"))
+   @bot.message_handler(func=lambda m: bool(m.text) and m.chat.type == "private"
+    and not m.text.startswith("/")
+    and not user_states.get(m.from_user.id))
     def h_chat(m):
         if m.from_user and user_states.get(m.from_user.id): return
         low = m.text.strip().lower()
