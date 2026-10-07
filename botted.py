@@ -1298,8 +1298,7 @@ def register_all_handlers(bot):
         try: bot.delete_message(m.chat.id, m.message_id)
         except: pass
         def say(t): bot.send_message(m.chat.id, t, reply_markup=back_markup())
-       if ":" not in tok or len(tok) < 20:
-            say("❌ Token không hợp lệ!"); return
+       
         if tok == BOT_TOKEN or token_exists(tok):
             say("❌ Token đã dùng!"); return
         try: info = telebot.TeleBot(tok).get_me()
