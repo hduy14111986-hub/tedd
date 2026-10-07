@@ -940,7 +940,7 @@ def register_all_handlers(bot):
         try: bot.answer_callback_query(c.id, "Trang hiện tại")
         except: pass
 
-    @bot.callback_query_handler(func=lambda c: True)
+    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith("smm_"))
     def cb_router(call):
         data = call.data or ""
         if data == "noop": return
