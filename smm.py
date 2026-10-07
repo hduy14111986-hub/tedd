@@ -107,7 +107,7 @@ def svc_list(p, platform=None, only_active=True):
     par = []
     if only_active: q += " AND active=1"
     if platform: q += " AND platform=?"; par.append(platform)
-    q += " ORDER BY platform, id LIMIT 200"
+    q += " ORDER BY id LIMIT 500"
     return _q(p, q, tuple(par), "all") or []
 
 def svc_get(p, sid):
@@ -116,8 +116,9 @@ def svc_get(p, sid):
     return dict(zip(["id","platform","name","api_service","cost","price","min","max","active"], r))
 
 def svc_add(p, pl, nm, api, cost, price, mn, mx):
-    return _q(p, "INSERT INTO smm_services (platform,name,api_service,cost,price,min,max) VALUES (?,?,?,?,?,?,?)",
-              (pl, nm, str(api), cost, price, mn, mx))
+    sql = "INSERT INTO smm_services (platform,name,api_service,cost,price,min,max) VALUES (?,?,?,?,?,?,?)"
+    return _q(p, sql, (pl, nm, str(api), cost, price, mn, mx))
+
 def svc_update(p, sid, f, v):
     if f not in ("platform","name","api_service","cost","price","min","max","active"): return
     _q(p, f"UPDATE smm_services SET {f}=? WHERE id=?", (v, sid))
@@ -193,8 +194,19 @@ def register(bot, h):
     show = h["show"]; back_markup = h["back_markup"]; user_states = h["user_states"]
     dbp = h["db_path_fn"]
 
+    # ===== SAFE WRAPPER =====
+    def _safe(fn):
+        def w(call):
+            try: fn(call)
+            except Exception as e:
+                log.exception("smm handler err: %s", e)
+                try: bot.answer_callback_query(call.id, f"❌ Lỗi: {str(e)[:100]}", show_alert=True)
+                except: pass
+        return w
+
     # ===== USER =====
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "smm_home")
+    @_safe
     def _home(call):
         bp = dbp(); plats = platforms_available(bp)
         if not plats:
@@ -209,17 +221,33 @@ def register(bot, h):
                    "💰 Trả bằng số dư\n🚀 Nhận ngay trong 30 giây</blockquote>\n\n👇 Chọn nền tảng:", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_plat|"))
+    @_safe
     def _plat(call):
-        pl = call.data.split("|", 1)[1]; bp = dbp(); svcs = svc_list(bp, pl)
+        parts = call.data.split("|")
+        pl = parts[1]
+        page = int(parts[2]) if len(parts) > 2 else 0
+        bp = dbp(); svcs = svc_list(bp, pl)
         if not svcs:
             show(call, "Chưa có dịch vụ.", back_markup("smm_home")); return
+        per = 15
+        tp = max(1, (len(svcs)+per-1)//per)
+        page = max(0, min(page, tp-1))
+        chunk = svcs[page*per:(page+1)*per]
         m = types.InlineKeyboardMarkup(row_width=1)
-        for s in svcs:
-            m.add(types.InlineKeyboardButton(f"#{s[0]} {s[2][:35]} – {fmt(s[5])}đ/1k", callback_data=f"smm_view|{s[0]}"))
+        for s in chunk:
+            nm = s[2] if len(s[2]) <= 24 else s[2][:23] + "…"
+            m.add(types.InlineKeyboardButton(f"#{s[0]} {nm} – {fmt(s[5])}đ",
+                  callback_data=f"smm_view|{s[0]}"))
+        nav = []
+        if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"smm_plat|{pl}|{page-1}"))
+        nav.append(types.InlineKeyboardButton(f"{page+1}/{tp}", callback_data="noop"))
+        if page < tp-1: nav.append(types.InlineKeyboardButton("➡️", callback_data=f"smm_plat|{pl}|{page+1}"))
+        if nav: m.row(*nav)
         m.add(types.InlineKeyboardButton("🔙 Nền tảng", callback_data="smm_home"))
-        show(call, f"<b>🎯 {html.escape(pl)}</b>\n\n{len(svcs)} dịch vụ:", m)
+        show(call, f"<b>🎯 {html.escape(pl)}</b>\n\n📊 {len(svcs)} dịch vụ | Trang {page+1}/{tp}", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_view|"))
+    @_safe
     def _view(call):
         sid = int(call.data.split("|")[1]); s = svc_get(dbp(), sid)
         if not s: show(call, "Không thấy.", back_markup("smm_home")); return
@@ -232,6 +260,7 @@ def register(bot, h):
         show(call, txt, m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_buy|"))
+    @_safe
     def _buy(call):
         sid = int(call.data.split("|")[1]); s = svc_get(dbp(), sid)
         if not s: return
@@ -279,6 +308,7 @@ def register(bot, h):
                         f"💵 <b>{fmt(price)}đ</b></blockquote>", reply_markup=kb)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_do|"))
+    @_safe
     def _do(call):
         try: _, sid_s, qty_s = call.data.split("|"); sid = int(sid_s); qty = int(qty_s)
         except: return
@@ -327,6 +357,7 @@ def register(bot, h):
         except: pass
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "smm_myorders")
+    @_safe
     def _myo(call):
         rows = order_list_user(dbp(), call.from_user.id, 15)
         if not rows:
@@ -339,6 +370,7 @@ def register(bot, h):
         show(call, f"<b>🛍 ĐƠN BUFF ({len(rows)})</b>", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_ov|"))
+    @_safe
     def _ov(call):
         oid = int(call.data.split("|")[1]); bp = dbp(); r = order_get(bp, oid)
         if not r or r["user_id"] != call.from_user.id:
@@ -471,7 +503,6 @@ def register(bot, h):
         url = cfg_get(bp, "smm_api_url", "(trống)")
         key = cfg_get(bp, "smm_api_key", "")
         kd = (key[:8] + "***") if len(key) > 10 else ("(trống)" if not key else "***")
-        # Kiểm tra thêm: parsed là list hay dict?
         if isinstance(parsed, list):
             info = f"📊 LIST có {len(parsed)} phần tử"
             if parsed: info += f"\n🔍 Item[0] type: {type(parsed[0]).__name__}"
@@ -523,7 +554,6 @@ def register(bot, h):
                     sk += 1
                     if len(errs) < 5: errs.append(f"[{i}] thiếu service id")
                     continue
-                # Kiểm tra trùng
                 try:
                     dup = _q(bp, "SELECT 1 FROM smm_services WHERE api_service=?", (api_id,), "one")
                     if dup:
@@ -540,11 +570,9 @@ def register(bot, h):
                 cost = int(round(rate_usd * rate))
                 price = int(round(cost * (1 + markup / 100.0)))
                 if price <= 0: price = 1000
-                try:
-                    mn = int(float(str(s.get("min") or 100).strip()))
+                try: mn = int(float(str(s.get("min") or 100).strip()))
                 except: mn = 100
-                try:
-                    mx = int(float(str(s.get("max") or 100000).strip()))
+                try: mx = int(float(str(s.get("max") or 100000).strip()))
                 except: mx = 100000
                 svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
                 added += 1
@@ -568,7 +596,8 @@ def register(bot, h):
         m = types.InlineKeyboardMarkup(row_width=1)
         for s in chunk:
             icon = "✅" if s[8] else "⛔"
-            m.add(types.InlineKeyboardButton(f"{icon} #{s[0]} {s[1]} | {s[2][:28]} – {fmt(s[5])}đ",
+            nm = s[2] if len(s[2]) <= 26 else s[2][:25] + "…"
+            m.add(types.InlineKeyboardButton(f"{icon} #{s[0]} {s[1]} | {nm} – {fmt(s[5])}đ",
                   callback_data=f"adm_smm_sv|{s[0]}"))
         nav = []
         if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_smm_pg|{page-1}"))
