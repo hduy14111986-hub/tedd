@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con thuê + Buff SMM + API Data"""
+"""BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con + Buff SMM + API Data"""
 import os, re, time, html, hmac, sqlite3, logging, threading, urllib.parse
 from collections import deque
 from contextlib import contextmanager
@@ -14,7 +14,6 @@ try:
 except Exception:
     genai = None; gtypes = None
 import smm
-import data_api
 
 def env(k, d=""): return os.environ.get(k, d).strip()
 
@@ -141,7 +140,6 @@ def init_db(path=None, is_main=False):
         except: pass
         c.executescript(SCHEMA)
         if is_main: c.executescript(MAIN_ONLY)
-        # Migration: thêm cột api_product_code nếu DB cũ
         try: c.execute("ALTER TABLE products ADD COLUMN api_product_code TEXT DEFAULT ''")
         except: pass
         for k, v in DEFAULT_SETTINGS.items():
@@ -201,6 +199,100 @@ def bank_info():
     if is_child(): return (setting_get("bank_name") or "—", setting_get("account_no") or "—", setting_get("account_name") or "—")
     return (BANK_NAME, ACCOUNT_NO, ACCOUNT_NAME)
 
+# ══════════════ API DATA (gộp trong file) ══════════════
+def call_ncc(url, key, code, qty, order_ref, method="POST", timeout=30):
+    """Gọi API NCC Data. Trả về (success, data, error)."""
+    payload = {"api_key": key, "product_code": code, "quantity": qty, "order_id": order_ref}
+    try:
+        if method.upper() == "GET":
+            r = requests.get(url, params=payload, timeout=timeout)
+        else:
+            r = requests.post(url, json=payload, timeout=timeout)
+        if r.status_code != 200:
+            return False, "", f"HTTP {r.status_code}: {r.text[:150]}"
+        try: j = r.json()
+        except Exception:
+            return True, r.text[:3000], ""
+        if isinstance(j, dict):
+            ok = j.get("success", j.get("status", True))
+            if ok in (False, "false", "fail", "error", 0, "0", None):
+                return False, "", str(j.get("message") or j.get("error") or j)[:200]
+            data = j.get("data") or j.get("result") or j.get("content") or j.get("message") or str(j)
+            return True, str(data), ""
+        return True, str(j), ""
+    except Exception as e:
+        return False, "", str(e)[:150]
+
+def register_data_api_handlers(bot):
+    """Đăng ký các nút admin cho API Data."""
+    def _menu(call, note=""):
+        bp = cur_db()
+        url = setting_get("data_api_url", "") or "(chưa set)"
+        key = setting_get("data_api_key", "")
+        kd = (key[:6] + "***") if len(key) > 10 else ("(chưa set)" if not key else "***")
+        method = setting_get("data_api_method", "POST")
+        txt = (f"<b>🌐 API DATA (NCC)</b>\n\n"
+               + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
+               + f"<blockquote>🔗 URL: <code>{html.escape(url[:60])}</code>\n"
+                 f"🔑 Key: <code>{html.escape(kd)}</code>\n"
+                 f"📡 Method: <b>{html.escape(method)}</b></blockquote>\n\n"
+                 "💡 URL + Key do NCC cấp. Sau đó vào <b>Sản phẩm → Sửa → Mã NCC</b> "
+                 "để gán mã cho từng SP Data.")
+        m = types.InlineKeyboardMarkup(row_width=1)
+        m.add(types.InlineKeyboardButton("🔗 Đổi URL", callback_data="adm_data_set|data_api_url"),
+              types.InlineKeyboardButton("🔑 Đổi Key", callback_data="adm_data_set|data_api_key"),
+              types.InlineKeyboardButton(f"📡 Method: {method}", callback_data="adm_data_toggle_method"),
+              types.InlineKeyboardButton("🧪 Test API", callback_data="adm_data_test"),
+              types.InlineKeyboardButton("🔙 Admin", callback_data="adm_panel"))
+        show(call, txt, m)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_data_api")
+    def _open(call):
+        if call.from_user.id != cur_admin(): return
+        _menu(call)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_data_set|"))
+    def _set(call):
+        if call.from_user.id != cur_admin(): return
+        k = call.data.split("|", 1)[1]
+        user_states[call.from_user.id] = f"DATA_SET|{k}"
+        show(call, f"Nhập giá trị mới cho <code>{k}</code>.\n/cancel hủy.", back_markup("adm_data_api"))
+
+    @bot.message_handler(func=lambda m: m.from_user and m.from_user.id == cur_admin() and
+        (user_states.get(m.from_user.id) or "").startswith("DATA_SET|") and m.text and not m.text.startswith("/"))
+    def _set_in(m):
+        raw = user_states.get(m.from_user.id, "")
+        try: k = raw.split("|", 1)[1]
+        except: user_states.pop(m.from_user.id, None); return
+        setting_set(k, m.text.strip())
+        user_states.pop(m.from_user.id, None)
+        bot.reply_to(m, f"✅ Đã lưu <code>{k}</code>.",
+            reply_markup=types.InlineKeyboardMarkup(row_width=1).add(
+                types.InlineKeyboardButton("🔙 API Data", callback_data="adm_data_api")))
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_data_toggle_method")
+    def _toggle(call):
+        if call.from_user.id != cur_admin(): return
+        cur = setting_get("data_api_method", "POST")
+        setting_set("data_api_method", "GET" if cur == "POST" else "POST")
+        _menu(call, "✅ Đã đổi method.")
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_data_test")
+    def _test(call):
+        if call.from_user.id != cur_admin(): return
+        url = setting_get("data_api_url", ""); key = setting_get("data_api_key", "")
+        method = setting_get("data_api_method", "POST")
+        if not url or not key:
+            _menu(call, "⚠️ Chưa set URL hoặc Key."); return
+        try: bot.answer_callback_query(call.id, "🧪 Đang test...")
+        except: pass
+        ok, data, err = call_ncc(url, key, "TEST", 1, "TESTBOT", method, timeout=15)
+        if ok:
+            _menu(call, f"✅ Kết nối OK:\n<code>{html.escape(str(data)[:200])}</code>")
+        else:
+            _menu(call, f"❌ Lỗi:\n<code>{html.escape(str(err)[:200])}</code>")
+
+# ══════════════ SHOP ══════════════
 def shop_list(only_active=True, limit=50):
     with db() as c:
         q = "SELECT id,name,price,category,stock,sold,active FROM products WHERE 1=1"
@@ -221,7 +313,6 @@ def shop_get(pid):
     return dict(zip(["id","name","description","price","category","stock","sold","active","api_product_code"], r))
 
 def shop_buy(uid, pid):
-    """Trừ tiền + tạo đơn. Trả về (ok, dict|err)."""
     with db() as c:
         r = c.execute("SELECT name,price,stock,active FROM products WHERE id=?", (pid,)).fetchone()
         if not r: return False, "Không tìm thấy SP"
@@ -859,12 +950,10 @@ def _user_from(tg):
     return get_or_create_user(tg.id, tg.username or "", tg.first_name or "Khách")
 
 def _handle_shop_buy(bot, call, data, uid, u):
-    """Xử lý mua hàng — có try/except và hỗ trợ API Data tự động."""
     pid = int(data.split("|", 1)[1])
     p = shop_get(pid)
     if not p:
         show(call, "❌ Không tìm thấy sản phẩm.", back_markup("shop_home")); return
-    # Refresh balance
     u = _user_from(call.from_user)
     if u["balance"] < p["price"]:
         kb = types.InlineKeyboardMarkup(row_width=1).add(
@@ -872,7 +961,7 @@ def _handle_shop_buy(bot, call, data, uid, u):
             types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home"))
         show(call, f"⚠️ Thiếu {fmt(p['price']-u['balance'])}đ", kb); return
 
-    # === PROXY ===
+    # PROXY
     if p["category"] == "Proxy":
         ok, err, info = proxy_buy(uid, pid)
         if not ok:
@@ -895,7 +984,7 @@ def _handle_shop_buy(bot, call, data, uid, u):
         except: pass
         return
 
-    # === DATA với API tự động ===
+    # DATA có API
     api_url = setting_get("data_api_url")
     api_key = setting_get("data_api_key")
     api_code = (p.get("api_product_code") or "").strip()
@@ -904,21 +993,18 @@ def _handle_shop_buy(bot, call, data, uid, u):
         if not ok:
             show(call, f"❌ {res}", back_markup("shop_home")); return
         method = setting_get("data_api_method", "POST")
-        success, data_str, err = data_api.call_ncc(api_url, api_key, api_code, 1,
-                                                    f"BOT{res['order_id']}", method)
+        success, data_str, err = call_ncc(api_url, api_key, api_code, 1,
+                                          f"BOT{res['order_id']}", method)
         if not success:
-            # Hoàn tiền
             admin_add_money(uid, res['price'])
             with db() as c:
                 c.execute("UPDATE orders SET status='refunded' WHERE id=?", (res['order_id'],))
             show(call, f"❌ NCC báo lỗi:\n<code>{html.escape(str(err)[:250])}</code>\n\n"
-                       f"💸 Đã hoàn <b>{fmt(res['price'])}đ</b>",
-                 back_markup("shop_home"))
+                       f"💸 Đã hoàn <b>{fmt(res['price'])}đ</b>", back_markup("shop_home"))
             try: bot.send_message(cur_admin(),
                 f"⚠️ API Data lỗi đơn #{res['order_id']}:\n<code>{html.escape(str(err)[:200])}</code>")
             except: pass
             return
-        # Thành công → gửi data cho user
         msg = (f"<b>🎉 MUA DATA THÀNH CÔNG!</b>\n\n<blockquote>"
                f"🧾 #{res['order_id']}\n📦 {html.escape(res['name'])}\n"
                f"💵 {fmt(res['price'])}đ\n🏦 Còn: <b>{fmt(u['balance']-res['price'])}đ</b></blockquote>\n\n"
@@ -933,7 +1019,7 @@ def _handle_shop_buy(bot, call, data, uid, u):
         except: pass
         return
 
-    # === SẢN PHẨM THƯỜNG (chờ admin xác nhận) ===
+    # SP thường
     ok, res = shop_buy(uid, pid)
     if not ok:
         show(call, f"❌ {res}", back_markup("shop_home")); return
@@ -992,8 +1078,7 @@ def register_all_handlers(bot):
                     reply_markup=back_markup("menu_back"))
             except: pass
 
-
-    # ============ STATE MESSAGE HANDLERS ============
+    # STATE HANDLERS
     @bot.message_handler(func=lambda m: m.from_user is not None and
         user_states.get(m.from_user.id) == "WAITING_BOT_TOKEN" and m.text and not m.text.startswith("/"))
     def h_token(m):
@@ -1163,16 +1248,13 @@ def register_all_handlers(bot):
         "get_user": get_or_create_user, "show": show,
         "back_markup": back_markup, "user_states": user_states,
     })
-    # DATA API
-    data_api.register(bot, {
-        "db_path_fn": cur_db, "cur_admin": cur_admin,
-        "show": show, "back_markup": back_markup, "user_states": user_states,
-    })
+    # DATA API (inline)
+    register_data_api_handlers(bot)
 
 
-# ══════════════ DISPATCH (tất cả nút của menu chính) ══════════════
+# ══════════════ DISPATCH ══════════════
 def _dispatch(bot, call, data, uid, u, is_admin):
-    # ---- MAIN ADMIN ----
+    # MAIN ADMIN
     if data == "adm_panel":
         if not is_admin or is_child(): return
         show(call, admin_text(), admin_markup())
@@ -1237,7 +1319,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         for k, v in DEFAULT_SETTINGS.items(): setting_set(k, v)
         show(call, "✅ Đã khôi phục mặc định.", back_markup("adm_ui"))
 
-    # ---- CHILD ADMIN ----
+    # CHILD ADMIN
     elif data == "cadm_panel":
         if not is_admin or not is_child(): return
         show(call, admin_text(), admin_markup())
@@ -1264,7 +1346,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         if p:
             if field == "price": cur_v = fmt(p["price"]) + "đ"
             elif field == "stock": cur_v = "Vô hạn" if p["stock"] < 0 else str(p["stock"])
-            elif field == "api_product_code": cur_v = p.get("api_product_code") or "(trống — dùng cho API Data)"
+            elif field == "api_product_code": cur_v = p.get("api_product_code") or "(trống)"
             else: cur_v = str(p.get(field, ""))[:300]
         show(call, f"<b>✏️ SỬA {field}</b>\n\nHiện: <blockquote>{html.escape(cur_v)}</blockquote>\n\n"
                    f"Nhập mới. /cancel hủy.", back_markup(f"cadm_prod_view|{pid}"))
@@ -1345,7 +1427,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         if not is_admin or not is_child(): return
         _cadm_export(call)
 
-    # ---- USER MENU ----
+    # USER MENU
     elif data == "menu_profile":
         show(call, f"<b>📊 TÀI KHOẢN</b>\n\n<blockquote>"
                    f"🆔 <code>{uid}</code>\n👤 {html.escape(call.from_user.first_name or 'Khách')}\n"
@@ -1395,7 +1477,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         user_states.pop(uid, None)
         show(call, home_text(u, is_admin), main_menu(uid))
 
-    # ---- SHOP ----
+    # SHOP
     elif data == "shop_home":
         show(call, shop_home_text(), shop_home_markup())
     elif data.startswith("shop_view|"):
@@ -1412,7 +1494,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         txt += "</blockquote>"
         show(call, txt, back_markup("shop_home"))
 
-    # ---- IPA ----
+    # IPA
     elif data == "ipa_home":
         items = ipa_list(limit=40)
         if not items:
@@ -1436,7 +1518,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
             log.warning("send ipa: %s", e)
             bot.send_message(call.message.chat.id, "❌ Không gửi được file.")
 
-    # ---- PROXY ----
+    # PROXY
     elif data == "proxy_my":
         rows = proxy_my(uid)
         if not rows:
@@ -1471,7 +1553,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         show(call, txt, back_markup("proxy_my"))
 
 
-# ══════════════ ADMIN HELPERS ══════════════
+# ADMIN HELPERS
 def _adm_bots_list(call):
     with sqlite3.connect(MAIN_DB) as c:
         rows = c.execute("SELECT id,user_id,bot_username,status,expires_at FROM user_bots ORDER BY id DESC LIMIT 50").fetchall()
