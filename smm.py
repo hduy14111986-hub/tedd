@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS smm_orders (
 
 PLATFORMS = [("TikTok","🎵"),("Facebook","📘"),("Instagram","📷"),("YouTube","▶️"),
              ("Shopee","🛒"),("Telegram","✈️"),("Twitter","🐦"),("Khác","🌐")]
-
 STATUS_VI = {"pending":"⏳ Chờ","processing":"⚙️ Chạy","in progress":"⚙️ Chạy",
              "inprogress":"⚙️ Chạy","completed":"✅ Xong","complete":"✅ Xong",
              "partial":"⚠️ Một phần","canceled":"❌ Hủy","cancelled":"❌ Hủy",
@@ -36,8 +35,7 @@ STATUS_VI = {"pending":"⏳ Chờ","processing":"⚙️ Chạy","in progress":"�
 def _q(db_path, sql, params=(), fetch=None):
     c = sqlite3.connect(db_path, timeout=30)
     try:
-        cur = c.execute(sql, params)
-        c.commit()
+        cur = c.execute(sql, params); c.commit()
         if fetch == "one": return cur.fetchone()
         if fetch == "all": return cur.fetchall()
         return cur.lastrowid
@@ -45,16 +43,12 @@ def _q(db_path, sql, params=(), fetch=None):
 
 def init_schema(db_path):
     c = sqlite3.connect(db_path, timeout=30)
-    try:
-        c.executescript(SCHEMA)
-        c.commit()
-    finally:
-        c.close()
+    try: c.executescript(SCHEMA); c.commit()
+    finally: c.close()
 
 def cfg_get(p, k, d=""):
     r = _q(p, "SELECT value FROM smm_cfg WHERE key=?", (k,), "one")
     return r[0] if r and r[0] else d
-
 def cfg_set(p, k, v):
     _q(p, "INSERT OR REPLACE INTO smm_cfg (key,value) VALUES (?,?)", (k, v))
 
@@ -84,28 +78,23 @@ def svc_list(p, platform=None, only_active=True):
     return _q(p, q, tuple(par), "all") or []
 
 def svc_get(p, sid):
-    r = _q(p, "SELECT id,platform,name,api_service,cost,price,min,max,active FROM smm_services WHERE id=?",
-           (sid,), "one")
+    r = _q(p, "SELECT id,platform,name,api_service,cost,price,min,max,active FROM smm_services WHERE id=?", (sid,), "one")
     if not r: return None
     return dict(zip(["id","platform","name","api_service","cost","price","min","max","active"], r))
 
 def svc_add(p, pl, nm, api, cost, price, mn, mx):
     return _q(p, "INSERT INTO smm_services (platform,name,api_service,cost,price,min,max) VALUES (?,?,?,?,?,?,?,?)",
               (pl, nm, str(api), cost, price, mn, mx))
-
 def svc_update(p, sid, f, v):
     if f not in ("platform","name","api_service","cost","price","min","max","active"): return
     _q(p, f"UPDATE smm_services SET {f}=? WHERE id=?", (v, sid))
-
 def svc_del(p, sid): _q(p, "DELETE FROM smm_services WHERE id=?", (sid,))
-
 def svc_toggle(p, sid):
     r = _q(p, "SELECT active FROM smm_services WHERE id=?", (sid,), "one")
     if not r: return None
     new = 0 if r[0] else 1
     _q(p, "UPDATE smm_services SET active=? WHERE id=?", (new, sid))
     return new
-
 def platforms_available(p):
     rows = _q(p, "SELECT DISTINCT platform FROM smm_services WHERE active=1", fetch="all")
     return [r[0] for r in rows] or []
@@ -114,26 +103,21 @@ def order_create(p, uid, svc, link, qty, price, api_o, st="pending"):
     return _q(p, "INSERT INTO smm_orders (user_id,service_id,service_name,platform,link,quantity,price,api_order,status) "
                  "VALUES (?,?,?,?,?,?,?,?,?)",
               (uid, svc["id"], svc["name"], svc["platform"], link, qty, price, str(api_o), st))
-
 def order_list_user(p, uid, lim=10):
     return _q(p, "SELECT id,service_name,platform,link,quantity,price,status,created_at "
                  "FROM smm_orders WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, lim), "all") or []
-
 def order_list_all(p, lim=30):
     return _q(p, "SELECT id,user_id,service_name,platform,quantity,price,status,api_order,created_at "
                  "FROM smm_orders ORDER BY id DESC LIMIT ?", (lim,), "all") or []
-
 def order_get(p, oid):
     r = _q(p, "SELECT id,user_id,service_id,service_name,platform,link,quantity,price,api_order,status,note "
               "FROM smm_orders WHERE id=?", (oid,), "one")
     if not r: return None
     return dict(zip(["id","user_id","service_id","service_name","platform","link",
                      "quantity","price","api_order","status","note"], r))
-
 def order_update(p, oid, st, sc=0, rm=0):
     _q(p, "UPDATE smm_orders SET status=?, start_count=?, remains=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
        (st, sc, rm, oid))
-
 def order_refund(p, oid):
     r = order_get(p, oid)
     if not r or r["status"] == "refunded": return False
@@ -142,7 +126,6 @@ def order_refund(p, oid):
     return True
 
 def status_vi(s): return STATUS_VI.get((s or "").lower().strip(), s or "—")
-
 def _detect_platform(t):
     t = t.lower()
     if "tiktok" in t: return "TikTok"
@@ -154,24 +137,18 @@ def _detect_platform(t):
     if "twitter" in t: return "Twitter"
     return "Khác"
 
-
 def register(bot, h):
     """h = {db_path_fn, fmt, cur_admin, get_user, show, back_markup, user_states}"""
     fmt = h["fmt"]; cur_admin = h["cur_admin"]; get_user = h["get_user"]
     show = h["show"]; back_markup = h["back_markup"]; user_states = h["user_states"]
     dbp = h["db_path_fn"]
 
-    def _user_ok(call):
-        return call.from_user.id
-
     # ===== USER =====
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "smm_home")
     def _home(call):
-        bp = dbp()
-        plats = platforms_available(bp)
+        bp = dbp(); plats = platforms_available(bp)
         if not plats:
-            show(call, "<b>🔥 BUFF MẠNG XÃ HỘI</b>\n\n⚠️ Chưa có dịch vụ. Liên hệ admin!", back_markup())
-            return
+            show(call, "<b>🔥 BUFF MẠNG XÃ HỘI</b>\n\n⚠️ Chưa có dịch vụ. Liên hệ admin!", back_markup()); return
         m = types.InlineKeyboardMarkup(row_width=2)
         btns = [types.InlineKeyboardButton(f"{i} {p}", callback_data=f"smm_plat|{p}")
                 for p, i in PLATFORMS if p in plats]
@@ -183,23 +160,21 @@ def register(bot, h):
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_plat|"))
     def _plat(call):
-        pl = call.data.split("|", 1)[1]; bp = dbp()
-        svcs = svc_list(bp, pl)
+        pl = call.data.split("|", 1)[1]; bp = dbp(); svcs = svc_list(bp, pl)
         if not svcs:
             show(call, "Chưa có dịch vụ.", back_markup("smm_home")); return
         m = types.InlineKeyboardMarkup(row_width=1)
         for s in svcs:
-            m.add(types.InlineKeyboardButton(f"#{s[0]} {s[2][:35]} – {fmt(s[5])}đ/1k",
-                  callback_data=f"smm_view|{s[0]}"))
+            m.add(types.InlineKeyboardButton(f"#{s[0]} {s[2][:35]} – {fmt(s[5])}đ/1k", callback_data=f"smm_view|{s[0]}"))
         m.add(types.InlineKeyboardButton("🔙 Nền tảng", callback_data="smm_home"))
-        show(call, f"<b>🎯 {pl}</b>\n\n{len(svcs)} dịch vụ:", m)
+        show(call, f"<b>🎯 {html.escape(pl)}</b>\n\n{len(svcs)} dịch vụ:", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_view|"))
     def _view(call):
         sid = int(call.data.split("|")[1]); s = svc_get(dbp(), sid)
         if not s: show(call, "Không thấy.", back_markup("smm_home")); return
         txt = (f"<b>🎯 {html.escape(s['name'])}</b>\n\n<blockquote>"
-               f"📱 {s['platform']}\n💵 <b>{fmt(s['price'])}đ / 1000</b>\n"
+               f"📱 {html.escape(s['platform'])}\n💵 <b>{fmt(s['price'])}đ / 1000</b>\n"
                f"📊 {fmt(s['min'])} – {fmt(s['max'])}</blockquote>")
         m = types.InlineKeyboardMarkup(row_width=1)
         m.add(types.InlineKeyboardButton("🛒 ĐẶT HÀNG", callback_data=f"smm_buy|{sid}"))
@@ -216,8 +191,7 @@ def register(bot, h):
              back_markup(f"smm_view|{sid}"))
 
     @bot.message_handler(func=lambda m: m.from_user and
-        (user_states.get(m.from_user.id) or "").startswith("SMM_LINK|") and
-        m.text and not m.text.startswith("/"))
+        (user_states.get(m.from_user.id) or "").startswith("SMM_LINK|") and m.text and not m.text.startswith("/"))
     def _gl(m):
         uid = m.from_user.id; raw = user_states.get(uid, "")
         try: sid = int(raw.split("|")[1])
@@ -230,8 +204,7 @@ def register(bot, h):
         bot.reply_to(m, f"✅ Đã nhận link.\n\n👉 Gửi <b>số lượng</b> ({fmt(s['min'])}–{fmt(s['max'])}).\n/cancel hủy.")
 
     @bot.message_handler(func=lambda m: m.from_user and
-        (user_states.get(m.from_user.id) or "").startswith("SMM_QTY|") and
-        m.text and not m.text.startswith("/"))
+        (user_states.get(m.from_user.id) or "").startswith("SMM_QTY|") and m.text and not m.text.startswith("/"))
     def _gq(m):
         uid = m.from_user.id; raw = user_states.get(uid, "")
         try: _, sid_s, link = raw.split("|", 2); sid = int(sid_s)
@@ -269,9 +242,8 @@ def register(bot, h):
         price = int(round(qty * s["price"] / 1000))
         c = sqlite3.connect(bp, timeout=30)
         try:
-            cur = c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
-                            (price, uid, price))
-            if cur.rowcount == 0:
+            if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
+                         (price, uid, price)).rowcount == 0:
                 c.rollback(); user_states.pop(uid, None)
                 bot.answer_callback_query(call.id, "Số dư không đủ"); return
             c.commit()
@@ -280,8 +252,7 @@ def register(bot, h):
         if isinstance(resp, dict) and resp.get("error"):
             c = sqlite3.connect(bp, timeout=30)
             try:
-                c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (price, uid))
-                c.commit()
+                c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (price, uid)); c.commit()
             finally: c.close()
             user_states.pop(uid, None)
             bot.edit_message_text(f"❌ LỖI: {html.escape(str(resp['error'])[:150])}\n💸 Đã hoàn {fmt(price)}đ",
@@ -319,8 +290,7 @@ def register(bot, h):
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_ov|"))
     def _ov(call):
-        oid = int(call.data.split("|")[1]); bp = dbp()
-        r = order_get(bp, oid)
+        oid = int(call.data.split("|")[1]); bp = dbp(); r = order_get(bp, oid)
         if not r or r["user_id"] != call.from_user.id:
             show(call, "Không thấy.", back_markup("smm_myorders")); return
         if r["api_order"] and r["status"] not in ("completed","refunded","canceled"):
@@ -336,7 +306,7 @@ def register(bot, h):
                    f"💵 {fmt(r['price'])}đ\n📌 <b>{status_vi(r['status'])}</b></blockquote>",
              back_markup("smm_myorders"))
 
-    # ===== ADMIN =====
+    # ===== ADMIN (prefix adm_smm_*) =====
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm")
     def _adm(call):
         if call.from_user.id != cur_admin(): return
@@ -346,7 +316,7 @@ def register(bot, h):
         key = cfg_get(bp, "smm_api_key", "")
         kd = (key[:6]+"***") if len(key)>10 else ("(chưa set)" if not key else "***")
         txt = (f"<b>🔥 BUFF SMM (ADMIN)</b>\n\n<blockquote>🌐 API: <code>{html.escape(api_url[:60])}</code>\n"
-               f"🔑 Key: <code>{kd}</code>\n📦 Dịch vụ: <b>{n}</b></blockquote>")
+               f"🔑 Key: <code>{html.escape(kd)}</code>\n📦 Dịch vụ: <b>{n}</b></blockquote>")
         m = types.InlineKeyboardMarkup(row_width=1)
         m.add(types.InlineKeyboardButton("⚙️ Cấu hình API", callback_data="adm_smm_cfg"),
               types.InlineKeyboardButton("🔄 Sync từ API", callback_data="adm_smm_sync"),
@@ -457,8 +427,9 @@ def register(bot, h):
         if not s: show(call, "Không thấy.", back_markup("adm_smm_list")); return
         profit = s["price"] - s["cost"]
         pct = round(profit*100/s["cost"]) if s["cost"] else 0
-        txt = (f"<b>📦 DV #{sid}</b>\n\n<blockquote>📱 {s['platform']}\n📝 {html.escape(s['name'])}\n"
-               f"🆔 <code>{s['api_service']}</code>\n💵 Nhập: <b>{fmt(s['cost'])}đ</b>/1k\n"
+        txt = (f"<b>📦 DV #{sid}</b>\n\n<blockquote>📱 {html.escape(s['platform'])}\n"
+               f"📝 {html.escape(s['name'])}\n"
+               f"🆔 <code>{html.escape(s['api_service'])}</code>\n💵 Nhập: <b>{fmt(s['cost'])}đ</b>/1k\n"
                f"💰 Bán: <b>{fmt(s['price'])}đ</b>/1k\n📈 Lãi: <b>{fmt(profit)}đ</b> ({pct}%)\n"
                f"📊 {fmt(s['min'])} – {fmt(s['max'])}\n🔖 {'✅' if s['active'] else '⛔'}</blockquote>")
         m = types.InlineKeyboardMarkup(row_width=2)
@@ -466,8 +437,7 @@ def register(bot, h):
               types.InlineKeyboardButton("💵 Giá", callback_data=f"adm_smm_ed|{sid}|price"))
         m.add(types.InlineKeyboardButton("📊 Min", callback_data=f"adm_smm_ed|{sid}|min"),
               types.InlineKeyboardButton("📊 Max", callback_data=f"adm_smm_ed|{sid}|max"))
-        m.add(types.InlineKeyboardButton("⛔ Tắt" if s["active"] else "✅ Bật",
-              callback_data=f"adm_smm_tg|{sid}"))
+        m.add(types.InlineKeyboardButton("⛔ Tắt" if s["active"] else "✅ Bật", callback_data=f"adm_smm_tg|{sid}"))
         m.add(types.InlineKeyboardButton("🗑️ XOÁ", callback_data=f"adm_smm_dl|{sid}"),
               types.InlineKeyboardButton("🔙", callback_data="adm_smm_list"))
         show(call, txt, m)
@@ -499,8 +469,7 @@ def register(bot, h):
     def _tg(call):
         if call.from_user.id != cur_admin(): return
         sid = int(call.data.split("|")[1]); svc_toggle(dbp(), sid)
-        call.data = f"adm_smm_sv|{sid}"
-        _sv(call)
+        call.data = f"adm_smm_sv|{sid}"; _sv(call)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_dl|"))
     def _dl(call):
@@ -553,7 +522,7 @@ def register(bot, h):
         show(call, f"<b>🧾 ĐƠN BUFF ({len(rows)})</b>", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_ov|"))
-    def _ov(call):
+    def _ov_admin(call):
         if call.from_user.id != cur_admin(): return
         oid = int(call.data.split("|")[1]); bp = dbp(); r = order_get(bp, oid)
         if not r: show(call, "Không thấy.", back_markup("adm_smm_orders")); return
@@ -578,10 +547,9 @@ def register(bot, h):
         oid = int(call.data.split("|")[1]); bp = dbp(); r = order_get(bp, oid)
         if not r: return
         order_refund(bp, oid)
-        try:
-            bot.send_message(r["user_id"], f"💸 Đã hoàn <b>{fmt(r['price'])}đ</b> cho đơn #{oid}.")
+        try: bot.send_message(r["user_id"], f"💸 Đã hoàn <b>{fmt(r['price'])}đ</b> cho đơn #{oid}.")
         except: pass
-        call.data = f"adm_smm_ov|{oid}"; _ov(call)
+        call.data = f"adm_smm_ov|{oid}"; _ov_admin(call)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_ref")
     def _ref(call):
