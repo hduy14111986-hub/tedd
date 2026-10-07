@@ -1232,18 +1232,14 @@ def register_all_handlers(bot):
         user_states.pop(m.from_user.id, None)
         bot.reply_to(m, f"✅ Đã sửa <b>{key}</b>.")
 
-   @bot.message_handler(func=lambda m: bool(m.text) and m.chat.type == "private"
-    and not m.text.startswith("/")
-    and not user_states.get(m.from_user.id))
+    @bot.message_handler(func=lambda m: bool(m.text) and m.chat.type == "private" and not m.text.startswith("/") and not user_states.get(m.from_user.id))
     def h_chat(m):
-        if m.from_user and user_states.get(m.from_user.id): return
         low = m.text.strip().lower()
         if low in ("menu", "help", "giúp"):
             bot.reply_to(m, "Bấm /menu nhé!"); return
         try: reply_ai(bot, m)
         except Exception as e:
             log.exception("AI: %s", e); bot.reply_to(m, "🤖 Bot bận!")
-
     # SMM
     smm.register(bot, {
         "db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
