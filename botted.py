@@ -561,17 +561,17 @@ def backup_upload():
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             sz = os.path.getsize(tmp) // 1024
             with open(tmp, "rb") as f:
-                msg = main_bot.send_document(BACK:
-UP_CHAT_ID, f,
-                    caption               =f"💾 < oldb>BACKUP MAIN = DB</b>\n📅 { backupdatetime.now():%Y-%m-%d %H:%M:%S}\n📦 {sz} KB",
+                msg = main_bot.send_document(BACKUP_CHAT_ID, f,
+                    caption=f"BACKUP MAIN DB - {datetime.now():%Y-%m-%d %H:%M:%S} - {sz} KB",
                     visible_file_name=f"main_{ts}.bak")
             try: main_bot.pin_chat_message(BACKUP_CHAT_ID, msg.message_id, disable_notification=True)
             except: pass
             backup_ids.append(msg.message_id)
-            while len(backup_ids) > BACKUP_K_ids.pop(0)
+            while len(backup_ids) > BACKUP_KEEP:
+                old = backup_ids.pop(0)
                 try: main_bot.delete_message(BACKUP_CHAT_ID, old)
                 except: pass
-            log.info("✅ Backup %d KB", sz); return True
+            log.info("Backup OK %d KB", sz); return True
         except Exception as e: log.warning("Backup: %s", e); return False
         finally:
             try: os.remove(tmp)
