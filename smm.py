@@ -43,7 +43,13 @@ def _q(db_path, sql, params=(), fetch=None):
         return cur.lastrowid
     finally: c.close()
 
-def init_schema(db_path): _q(db_path, SCHEMA)
+def init_schema(db_path):
+    c = sqlite3.connect(db_path, timeout=30)
+    try:
+        c.executescript(SCHEMA)
+        c.commit()
+    finally:
+        c.close()
 
 def cfg_get(p, k, d=""):
     r = _q(p, "SELECT value FROM smm_cfg WHERE key=?", (k,), "one")
