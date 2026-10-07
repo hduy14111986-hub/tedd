@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Module Buff Mạng Xã Hội — UI nhóm loại + chọn DV từ API"""
+"""Module Buff Mạng Xã Hội — Full chức năng"""
 import os, re, time, html, json, sqlite3, logging, threading
 from datetime import datetime
 import requests
@@ -217,7 +217,6 @@ def svc_in_subtype(bp, platform, subtype):
 
 # ═══════════ HELPERS ═══════════
 def _parse_service(s, rate, markup):
-    """Chuyển service thô từ API thành tuple insert DB."""
     nm = str(s.get("name") or "Dịch vụ")[:80]
     cat = str(s.get("category") or s.get("type") or "Khác")[:30]
     try: rate_usd = float(s.get("rate") or 0)
@@ -231,12 +230,31 @@ def _parse_service(s, rate, markup):
     except: mx = 100000
     return nm, cat, cost, price, mn, mx, rate_usd
 
-def _norm_cache_platform(s):
-    return _normalize_platform(s.get("platform"), str(s.get("name") or ""), str(s.get("category") or ""))
-
 def _svc_rate(s):
     try: return float(s.get("rate") or 0)
     except: return 0
+
+def _detect_platform(t):
+    t = t.lower()
+    if "tiktok" in t: return "TikTok"
+    if "facebook" in t or "fb" in t: return "Facebook"
+    if "instagram" in t or "ins" in t: return "Instagram"
+    if "youtube" in t or "ytb" in t: return "YouTube"
+    if "shopee" in t: return "Shopee"
+    if "telegram" in t: return "Telegram"
+    if "twitter" in t: return "Twitter"
+    return "Khác"
+
+def _normalize_platform(raw, name, cat):
+    if raw:
+        p = str(raw).strip()
+        for known, _ in PLATFORMS:
+            if p.lower() == known.lower(): return known
+        return _detect_platform(p + " " + name + " " + cat)
+    return _detect_platform(name + " " + cat)
+
+def _norm_cache_platform(s):
+    return _normalize_platform(s.get("platform"), str(s.get("name") or ""), str(s.get("category") or ""))
 
 
 # ═══════════ ORDERS ═══════════
@@ -266,27 +284,7 @@ def order_refund(p, oid):
     _q(p, "UPDATE smm_orders SET status='refunded' WHERE id=?", (oid,))
     return True
 
-
-# ═══════════ PLATFORM DETECT ═══════════
 def status_vi(s): return STATUS_VI.get((s or "").lower().strip(), s or "—")
-def _detect_platform(t):
-    t = t.lower()
-    if "tiktok" in t: return "TikTok"
-    if "facebook" in t or "fb" in t: return "Facebook"
-    if "instagram" in t or "ins" in t: return "Instagram"
-    if "youtube" in t or "ytb" in t: return "YouTube"
-    if "shopee" in t: return "Shopee"
-    if "telegram" in t: return "Telegram"
-    if "twitter" in t: return "Twitter"
-    return "Khác"
-
-def _normalize_platform(raw, name, cat):
-    if raw:
-        p = str(raw).strip()
-        for known, _ in PLATFORMS:
-            if p.lower() == known.lower(): return known
-        return _detect_platform(p + " " + name + " " + cat)
-    return _detect_platform(name + " " + cat)
 
 
 def register(bot, h):
@@ -537,6 +535,8 @@ def register(bot, h):
               types.InlineKeyboardButton("🧾 Đơn hàng", callback_data="adm_smm_orders"),
               types.InlineKeyboardButton("💵 Số dư API", callback_data="adm_smm_bal"),
               types.InlineKeyboardButton("➕ Thêm 1 DV thủ công", callback_data="adm_smm_add"),
+              types.InlineKeyboardButton("🧹 Xóa TẤT CẢ DV", callback_data="adm_smm_wipe"),
+              types.InlineKeyboardButton("🗑️ Xóa cache API", callback_data="adm_smm_cachewipe"),
               types.InlineKeyboardButton("🔙 Admin", callback_data="adm_panel"))
         show(call, txt, m)
 
@@ -659,7 +659,7 @@ def register(bot, h):
         m.add(types.InlineKeyboardButton("🔙", callback_data=f"adm_pick_plat|{pl}"))
         show(call, f"<b>📥 {pl} · {sub}</b>\n\n"
                    f"<blockquote>📊 {len(matched)} DV · Trang {page+1}/{tp}\n"
-                   f"💡 Bấm ✅/➕ để thêm/xem chi tiết</blockquote>", m)
+                   f"💡 Bấm để thêm DV</blockquote>", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_pick_do|"))
     @_safe
@@ -716,6 +716,51 @@ def register(bot, h):
                 log.warning("pick_all: %s", e); sk += 1
         show(call, f"✅ Đã thêm <b>{added}</b> DV\n⏭ Bỏ qua: {sk}",
              back_markup(f"adm_pick_sub|{pl}|{sub}"))
+
+    # ═══════════ XÓA DV + CACHE ═══════════
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_wipe")
+    @_safe
+    def _wipe(call):
+        if call.from_user.id != cur_admin(): return
+        bp = dbp()
+        n = svc_count(bp)
+        if n <= 0:
+            try: bot.answer_callback_query(call.id, "DB đã rỗng")
+            except: pass
+            _adm_menu(call, "ℹ️ DB không có DV nào.")
+            return
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("✅ XOÁ HẾT", callback_data="adm_smm_wipeok"),
+               types.InlineKeyboardButton("❌ Hủy", callback_data="adm_smm"))
+        show(call, f"⚠️ <b>XOÁ TẤT CẢ {n} DỊCH VỤ?</b>\n\n"
+                   "🚨 Hành động này <b>KHÔNG THỂ HOÀN TÁC</b>!\n\n"
+                   "Các đơn hàng cũ vẫn giữ nguyên lịch sử.\n\n"
+                   "Sau khi xóa, cần <b>🔄 Tải DS từ API</b> + <b>📥 Chọn DV</b> lại.", kb)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_wipeok")
+    @_safe
+    def _wipeok(call):
+        if call.from_user.id != cur_admin(): return
+        bp = dbp()
+        n = svc_count(bp)
+        try: _q(bp, "DELETE FROM smm_services")
+        except Exception as e:
+            log.warning("wipe err: %s", e)
+            try: bot.answer_callback_query(call.id, f"❌ Lỗi: {e}", show_alert=True)
+            except: pass
+            return
+        log.info("Wiped %d services", n)
+        _adm_menu(call, f"✅ Đã xoá <b>{n}</b> dịch vụ khỏi DB.")
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_cachewipe")
+    @_safe
+    def _cachewipe(call):
+        if call.from_user.id != cur_admin(): return
+        bp = dbp()
+        ccount = cfg_get(bp, "smm_cache_count", "0")
+        cache_clear(bp)
+        _adm_menu(call, f"✅ Đã xoá cache API ({ccount} DV).\n"
+                       "Bấm 🔄 Tải DS từ API để nạp lại.")
 
     # ═══════════ CONFIG ═══════════
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_cfg")
