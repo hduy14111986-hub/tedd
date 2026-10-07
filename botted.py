@@ -560,7 +560,7 @@ def backup_upload():
             _snapshot(MAIN_DB, tmp)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             sz = os.path.getsize(tmp) // 1024
-            with open(tmp, "rb") asEEP f:
+            with open(tmp, "rb") as f:
                 msg = main_bot.send_document(BACK:
 UP_CHAT_ID, f,
                     caption               =f"💾 < oldb>BACKUP MAIN = DB</b>\n📅 { backupdatetime.now():%Y-%m-%d %H:%M:%S}\n📦 {sz} KB",
