@@ -32,9 +32,8 @@ STATUS_VI = {"pending":"⏳ Chờ","processing":"⚙️ Chạy","in progress":"�
              "partial":"⚠️ Một phần","canceled":"❌ Hủy","cancelled":"❌ Hủy",
              "refunded":"💸 Hoàn tiền","error":"❌ Lỗi"}
 
-# ---- Cấu hình mặc định cho việc tính giá từ API ----
-DEFAULT_USD_RATE = 25000   # 1 USD = 25.000 VNĐ (admin có thể sửa)
-DEFAULT_MARKUP   = 30      # % lãi cộng thêm
+DEFAULT_USD_RATE = 25000
+DEFAULT_MARKUP   = 30
 
 def _q(db_path, sql, params=(), fetch=None):
     c = sqlite3.connect(db_path, timeout=30)
@@ -76,6 +75,7 @@ def _api(p, action, **params):
     except Exception as e: return {"error": str(e)[:150]}
 
 def api_balance(p): return _api(p, "balance")
+
 def api_services(p):
     url = cfg_get(p, "smm_api_url"); key = cfg_get(p, "smm_api_key")
     if not url or not key: return {"error": "Chưa cấu hình API"}
@@ -88,7 +88,6 @@ def api_services(p):
     except Exception as e: return {"error": str(e)[:200]}
 
 def api_debug(p):
-    """Trả về (status_code, body_text, parsed_or_error) để admin debug."""
     url = cfg_get(p, "smm_api_url"); key = cfg_get(p, "smm_api_key")
     if not url or not key: return 0, "", "Chưa cấu hình API"
     try:
@@ -99,6 +98,7 @@ def api_debug(p):
         return r.status_code, body, parsed
     except Exception as e:
         return 0, "", str(e)[:200]
+
 def api_add(p, sid, link, qty): return _api(p, "add", service=sid, link=link, quantity=qty)
 def api_status(p, oid): return _api(p, "status", order=oid)
 
@@ -171,12 +171,10 @@ def _detect_platform(t):
     return "Khác"
 
 def _normalize_platform(raw, name, cat):
-    """Ưu tiên field 'platform' của API; nếu không có mới đoán."""
     if raw:
         p = str(raw).strip()
         for known, _ in PLATFORMS:
             if p.lower() == known.lower(): return known
-        # Fallback: đoán từ tên
         return _detect_platform(p + " " + name + " " + cat)
     return _detect_platform(name + " " + cat)
 
@@ -436,7 +434,7 @@ def register(bot, h):
         show(call, f"<b>💰 SỐ DƯ API</b>\n\n<blockquote>{html.escape(str(api_balance(dbp()))[:300])}</blockquote>",
              back_markup("adm_smm"))
 
-      @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_debug")
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_debug")
     def _debug(call):
         if call.from_user.id != cur_admin(): return
         bp = dbp()
@@ -463,9 +461,14 @@ def register(bot, h):
         try: bot.answer_callback_query(call.id, "🔄 Đang tải...")
         except: pass
         resp = api_services(bp)
+        if isinstance(resp, dict) and "error" in resp:
+            show(call, f"❌ <b>API BÁO LỖI</b>\n\n<blockquote>"
+                       f"<code>{html.escape(str(resp['error'])[:300])}</code></blockquote>\n\n"
+                       "💡 Kiểm tra lại API Key hoặc liên hệ NCC.",
+                 back_markup("adm_smm")); return
         if not isinstance(resp, list):
-            err = resp.get("error") if isinstance(resp, dict) else str(resp)
-            show(call, f"❌ Lỗi API: <blockquote>{html.escape(str(err)[:250])}</blockquote>",
+            err = str(resp)[:250]
+            show(call, f"❌ Lỗi API: <blockquote>{html.escape(err)}</blockquote>",
                  back_markup("adm_smm")); return
         rate = _get_rate(bp); markup = _get_markup(bp)
         added = 0; sk = 0
@@ -477,14 +480,12 @@ def register(bot, h):
                     sk += 1; continue
                 nm = str(s.get("name") or "Dịch vụ")[:80]
                 cat = str(s.get("category") or s.get("type") or "Khác")[:30]
-                # Dùng field platform từ API nếu có
                 pl = _normalize_platform(s.get("platform"), nm, cat)
-                # Rate là USD/1000 → nhân tỷ giá
                 try: rate_usd = float(s.get("rate") or 0)
                 except: rate_usd = 0
                 cost = int(round(rate_usd * rate))
                 price = int(round(cost * (1 + markup / 100.0)))
-                if price <= 0: price = 1000  # safety
+                if price <= 0: price = 1000
                 mn = int(s.get("min") or 100); mx = int(s.get("max") or 100000)
                 svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
                 added += 1
