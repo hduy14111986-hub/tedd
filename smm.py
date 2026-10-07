@@ -32,6 +32,10 @@ STATUS_VI = {"pending":"⏳ Chờ","processing":"⚙️ Chạy","in progress":"�
              "partial":"⚠️ Một phần","canceled":"❌ Hủy","cancelled":"❌ Hủy",
              "refunded":"💸 Hoàn tiền","error":"❌ Lỗi"}
 
+# ---- Cấu hình mặc định cho việc tính giá từ API ----
+DEFAULT_USD_RATE = 25000   # 1 USD = 25.000 VNĐ (admin có thể sửa)
+DEFAULT_MARKUP   = 30      # % lãi cộng thêm
+
 def _q(db_path, sql, params=(), fetch=None):
     c = sqlite3.connect(db_path, timeout=30)
     try:
@@ -51,6 +55,13 @@ def cfg_get(p, k, d=""):
     return r[0] if r and r[0] else d
 def cfg_set(p, k, v):
     _q(p, "INSERT OR REPLACE INTO smm_cfg (key,value) VALUES (?,?)", (k, v))
+
+def _get_rate(p):
+    try: return int(cfg_get(p, "smm_usd_rate", str(DEFAULT_USD_RATE)))
+    except: return DEFAULT_USD_RATE
+def _get_markup(p):
+    try: return float(cfg_get(p, "smm_markup_pct", str(DEFAULT_MARKUP)))
+    except: return DEFAULT_MARKUP
 
 def _api(p, action, **params):
     url = cfg_get(p, "smm_api_url"); key = cfg_get(p, "smm_api_key")
@@ -136,6 +147,17 @@ def _detect_platform(t):
     if "telegram" in t: return "Telegram"
     if "twitter" in t: return "Twitter"
     return "Khác"
+
+def _normalize_platform(raw, name, cat):
+    """Ưu tiên field 'platform' của API; nếu không có mới đoán."""
+    if raw:
+        p = str(raw).strip()
+        for known, _ in PLATFORMS:
+            if p.lower() == known.lower(): return known
+        # Fallback: đoán từ tên
+        return _detect_platform(p + " " + name + " " + cat)
+    return _detect_platform(name + " " + cat)
+
 
 def register(bot, h):
     """h = {db_path_fn, fmt, cur_admin, get_user, show, back_markup, user_states}"""
@@ -306,26 +328,36 @@ def register(bot, h):
                    f"💵 {fmt(r['price'])}đ\n📌 <b>{status_vi(r['status'])}</b></blockquote>",
              back_markup("smm_myorders"))
 
-    # ===== ADMIN (prefix adm_smm_*) =====
-    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm")
-    def _adm(call):
-        if call.from_user.id != cur_admin(): return
+    # ===== ADMIN =====
+    def _adm_menu(call, note=""):
         bp = dbp()
         n = len(svc_list(bp, only_active=False))
         api_url = cfg_get(bp, "smm_api_url", "—") or "—"
         key = cfg_get(bp, "smm_api_key", "")
         kd = (key[:6]+"***") if len(key)>10 else ("(chưa set)" if not key else "***")
-        txt = (f"<b>🔥 BUFF SMM (ADMIN)</b>\n\n<blockquote>🌐 API: <code>{html.escape(api_url[:60])}</code>\n"
-               f"🔑 Key: <code>{html.escape(kd)}</code>\n📦 Dịch vụ: <b>{n}</b></blockquote>")
+        rate = _get_rate(bp); markup = _get_markup(bp)
+        txt = (f"<b>🔥 BUFF SMM (ADMIN)</b>\n\n"
+               + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
+               + f"<blockquote>🌐 API: <code>{html.escape(api_url[:55])}</code>\n"
+                 f"🔑 Key: <code>{html.escape(kd)}</code>\n"
+                 f"💵 Tỷ giá: <b>{fmt(rate)}đ/USD</b>\n"
+                 f"📈 Lãi: <b>{markup}%</b>\n"
+                 f"📦 Dịch vụ: <b>{n}</b></blockquote>")
         m = types.InlineKeyboardMarkup(row_width=1)
         m.add(types.InlineKeyboardButton("⚙️ Cấu hình API", callback_data="adm_smm_cfg"),
+              types.InlineKeyboardButton("💰 Giá & Lãi", callback_data="adm_smm_price"),
               types.InlineKeyboardButton("🔄 Sync từ API", callback_data="adm_smm_sync"),
               types.InlineKeyboardButton("📦 DS dịch vụ", callback_data="adm_smm_list"),
               types.InlineKeyboardButton("➕ Thêm thủ công", callback_data="adm_smm_add"),
               types.InlineKeyboardButton("🧾 Đơn hàng", callback_data="adm_smm_orders"),
-              types.InlineKeyboardButton("💰 Số dư API", callback_data="adm_smm_bal"),
+              types.InlineKeyboardButton("💵 Số dư API", callback_data="adm_smm_bal"),
               types.InlineKeyboardButton("🔙 Admin", callback_data="adm_panel"))
         show(call, txt, m)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm")
+    def _adm(call):
+        if call.from_user.id != cur_admin(): return
+        _adm_menu(call)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_cfg")
     def _cfg(call):
@@ -337,12 +369,30 @@ def register(bot, h):
         show(call, "<b>⚙️ CẤU HÌNH API</b>\n\nNhập URL dạng: <code>https://ncc.com/api/v2</code>\n"
                    "Key do nhà cung cấp cấp.", m)
 
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_price")
+    def _price_menu(call):
+        if call.from_user.id != cur_admin(): return
+        bp = dbp()
+        m = types.InlineKeyboardMarkup(row_width=1)
+        m.add(types.InlineKeyboardButton(f"💵 Tỷ giá USD→VNĐ: {fmt(_get_rate(bp))}đ",
+              callback_data="adm_smm_set|smm_usd_rate"),
+              types.InlineKeyboardButton(f"📈 % Lãi: {_get_markup(bp)}%",
+              callback_data="adm_smm_set|smm_markup_pct"),
+              types.InlineKeyboardButton("🔙", callback_data="adm_smm"))
+        show(call, "<b>💰 CẤU HÌNH GIÁ & LÃI</b>\n\n"
+                   "API SMM trả rate theo <b>USD/1000</b>.\n"
+                   "Giá bán = <code>rate × tỷ_giá × (1 + lãi%)</code>\n\n"
+                   "VD: rate 0.90 USD, tỷ giá 25.000, lãi 30%\n"
+                   "→ giá bán = 0.90 × 25.000 × 1.3 = 29.250đ/1k", m)
+
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_set|"))
     def _setc(call):
         if call.from_user.id != cur_admin(): return
         k = call.data.split("|", 1)[1]
         user_states[call.from_user.id] = f"SMM_CFG|{k}"
-        show(call, f"Nhập giá trị mới cho <code>{k}</code>. /cancel hủy.", back_markup("adm_smm_cfg"))
+        hint = "VD: 25000" if k == "smm_usd_rate" else ("VD: 30" if k == "smm_markup_pct" else "Nhập giá trị")
+        show(call, f"Nhập giá trị mới cho <code>{k}</code>.\n<i>{hint}</i>\n/cancel hủy.",
+             back_markup("adm_smm_cfg"))
 
     @bot.message_handler(func=lambda m: m.from_user and m.from_user.id == cur_admin() and
         (user_states.get(m.from_user.id) or "").startswith("SMM_CFG|") and m.text and not m.text.startswith("/"))
@@ -352,9 +402,10 @@ def register(bot, h):
         except: user_states.pop(m.from_user.id, None); return
         cfg_set(dbp(), k, m.text.strip())
         user_states.pop(m.from_user.id, None)
+        back = "adm_smm_price" if k in ("smm_usd_rate","smm_markup_pct") else "adm_smm_cfg"
         bot.reply_to(m, f"✅ Đã lưu <code>{k}</code>.",
             reply_markup=types.InlineKeyboardMarkup(row_width=1).add(
-                types.InlineKeyboardButton("🔙 Cấu hình", callback_data="adm_smm_cfg")))
+                types.InlineKeyboardButton("🔙 Quay lại", callback_data=back)))
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_bal")
     def _bal(call):
@@ -368,11 +419,14 @@ def register(bot, h):
         bp = dbp()
         if not cfg_get(bp, "smm_api_url") or not cfg_get(bp, "smm_api_key"):
             show(call, "⚠️ Chưa cấu hình API.", back_markup("adm_smm_cfg")); return
-        bot.answer_callback_query(call.id, "🔄 Đang tải...")
+        try: bot.answer_callback_query(call.id, "🔄 Đang tải...")
+        except: pass
         resp = api_services(bp)
         if not isinstance(resp, list):
             err = resp.get("error") if isinstance(resp, dict) else str(resp)
-            show(call, f"❌ Lỗi API: <blockquote>{html.escape(str(err)[:250])}</blockquote>", back_markup("adm_smm")); return
+            show(call, f"❌ Lỗi API: <blockquote>{html.escape(str(err)[:250])}</blockquote>",
+                 back_markup("adm_smm")); return
+        rate = _get_rate(bp); markup = _get_markup(bp)
         added = 0; sk = 0
         for s in resp:
             try:
@@ -382,15 +436,21 @@ def register(bot, h):
                     sk += 1; continue
                 nm = str(s.get("name") or "Dịch vụ")[:80]
                 cat = str(s.get("category") or s.get("type") or "Khác")[:30]
-                pl = _detect_platform(nm + " " + cat)
-                cost = int(round(float(s.get("rate") or 0)))
-                price = int(round(cost * 1.3))
+                # Dùng field platform từ API nếu có
+                pl = _normalize_platform(s.get("platform"), nm, cat)
+                # Rate là USD/1000 → nhân tỷ giá
+                try: rate_usd = float(s.get("rate") or 0)
+                except: rate_usd = 0
+                cost = int(round(rate_usd * rate))
+                price = int(round(cost * (1 + markup / 100.0)))
+                if price <= 0: price = 1000  # safety
                 mn = int(s.get("min") or 100); mx = int(s.get("max") or 100000)
                 svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
                 added += 1
             except Exception as e: log.warning("sync: %s", e); sk += 1
         show(call, f"✅ <b>SYNC XONG</b>\n\n➕ Thêm: <b>{added}</b>\n⏭ Bỏ qua: {sk}\n\n"
-                   f"💡 Giá bán = giá gốc × 1.3. Sửa lại nếu cần.", back_markup("adm_smm"))
+                   f"💵 Tỷ giá: {fmt(rate)}đ/USD | 📈 Lãi: {markup}%\n"
+                   f"💡 Vào <b>DS dịch vụ</b> xem lại giá nếu cần.", back_markup("adm_smm"))
 
     def _show_svc(call, page=0):
         bp = dbp(); svcs = svc_list(bp, only_active=False)
@@ -429,15 +489,18 @@ def register(bot, h):
         pct = round(profit*100/s["cost"]) if s["cost"] else 0
         txt = (f"<b>📦 DV #{sid}</b>\n\n<blockquote>📱 {html.escape(s['platform'])}\n"
                f"📝 {html.escape(s['name'])}\n"
-               f"🆔 <code>{html.escape(s['api_service'])}</code>\n💵 Nhập: <b>{fmt(s['cost'])}đ</b>/1k\n"
-               f"💰 Bán: <b>{fmt(s['price'])}đ</b>/1k\n📈 Lãi: <b>{fmt(profit)}đ</b> ({pct}%)\n"
+               f"🆔 <code>{html.escape(s['api_service'])}</code>\n"
+               f"💵 Nhập: <b>{fmt(s['cost'])}đ</b>/1k\n"
+               f"💰 Bán: <b>{fmt(s['price'])}đ</b>/1k\n"
+               f"📈 Lãi: <b>{fmt(profit)}đ</b> ({pct}%)\n"
                f"📊 {fmt(s['min'])} – {fmt(s['max'])}\n🔖 {'✅' if s['active'] else '⛔'}</blockquote>")
         m = types.InlineKeyboardMarkup(row_width=2)
         m.add(types.InlineKeyboardButton("✏️ Tên", callback_data=f"adm_smm_ed|{sid}|name"),
               types.InlineKeyboardButton("💵 Giá", callback_data=f"adm_smm_ed|{sid}|price"))
         m.add(types.InlineKeyboardButton("📊 Min", callback_data=f"adm_smm_ed|{sid}|min"),
               types.InlineKeyboardButton("📊 Max", callback_data=f"adm_smm_ed|{sid}|max"))
-        m.add(types.InlineKeyboardButton("⛔ Tắt" if s["active"] else "✅ Bật", callback_data=f"adm_smm_tg|{sid}"))
+        m.add(types.InlineKeyboardButton("⛔ Tắt" if s["active"] else "✅ Bật",
+              callback_data=f"adm_smm_tg|{sid}"))
         m.add(types.InlineKeyboardButton("🗑️ XOÁ", callback_data=f"adm_smm_dl|{sid}"),
               types.InlineKeyboardButton("🔙", callback_data="adm_smm_list"))
         show(call, txt, m)
