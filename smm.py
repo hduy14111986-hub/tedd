@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Module Buff Mạng Xã Hội"""
+"""Module Buff Mạng Xã Hội — UI nhóm theo loại"""
 import os, re, time, html, sqlite3, logging, threading
 from datetime import datetime
 import requests
@@ -27,6 +27,18 @@ CREATE TABLE IF NOT EXISTS smm_orders (
 
 PLATFORMS = [("TikTok","🎵"),("Facebook","📘"),("Instagram","📷"),("YouTube","▶️"),
              ("Shopee","🛒"),("Telegram","✈️"),("Twitter","🐦"),("Khác","🌐")]
+
+# Loại dịch vụ con — thứ tự hiển thị
+SUBTYPES = [
+    ("Tim",     "❤️", ["tim", "like", "tym", "heart", "cảm xúc"]),
+    ("Follow",  "👥", ["follow", "fl ", " fl", "theo dõi", "sub", "follower"]),
+    ("Share",   "🔁", ["share", "chia sẻ", "repost", "lan truyền"]),
+    ("View",    "👁", ["view", "lượt xem", "xem ", "watch", "play"]),
+    ("Comment", "💬", ["comment", "cmt", "bình luận", "bl "]),
+    ("Live",    "📡", ["live", "mắt live", "stream"]),
+    ("Khác",    "🌐", []),  # fallback
+]
+
 STATUS_VI = {"pending":"⏳ Chờ","processing":"⚙️ Chạy","in progress":"⚙️ Chạy",
              "inprogress":"⚙️ Chạy","completed":"✅ Xong","complete":"✅ Xong",
              "partial":"⚠️ Một phần","canceled":"❌ Hủy","cancelled":"❌ Hủy",
@@ -75,7 +87,6 @@ def _api(p, action, **params):
     except Exception as e: return {"error": str(e)[:150]}
 
 def api_balance(p): return _api(p, "balance")
-
 def api_services(p):
     url = cfg_get(p, "smm_api_url"); key = cfg_get(p, "smm_api_key")
     if not url or not key: return {"error": "Chưa cấu hình API"}
@@ -107,7 +118,7 @@ def svc_list(p, platform=None, only_active=True):
     par = []
     if only_active: q += " AND active=1"
     if platform: q += " AND platform=?"; par.append(platform)
-    q += " ORDER BY id LIMIT 500"
+    q += " ORDER BY price ASC LIMIT 500"
     return _q(p, q, tuple(par), "all") or []
 
 def svc_get(p, sid):
@@ -129,6 +140,7 @@ def svc_toggle(p, sid):
     new = 0 if r[0] else 1
     _q(p, "UPDATE smm_services SET active=? WHERE id=?", (new, sid))
     return new
+
 def platforms_available(p):
     rows = _q(p, "SELECT DISTINCT platform FROM smm_services WHERE active=1", fetch="all")
     return [r[0] for r in rows] or []
@@ -138,8 +150,44 @@ def svc_count(p):
         r = _q(p, "SELECT COUNT(*) FROM smm_services", fetch="one")
         return r[0] if r else 0
     except Exception as e:
-        log.warning("svc_count err: %s", e)
-        return -1
+        log.warning("svc_count err: %s", e); return -1
+
+# ===== PHÂN LOẠI DỊCH VỤ THEO LOẠI =====
+def detect_subtype(name):
+    """Nhận diện loại dịch vụ từ tên. Trả về tên loại (Tim/Follow/...)."""
+    low = (name or "").lower()
+    # Ưu tiên theo thứ tự SUBTYPES
+    for label, _, keys in SUBTYPES:
+        if label == "Khác": continue
+        for k in keys:
+            if k in low: return label
+    return "Khác"
+
+def list_subtypes(bp, platform):
+    """Trả về [(label, icon, count, min_price), ...] cho nền tảng."""
+    rows = svc_list(bp, platform)
+    groups = {}
+    for s in rows:
+        # s = (id, platform, name, api_service, cost, price, min, max, active)
+        label = detect_subtype(s[2])
+        if label not in groups:
+            groups[label] = {"count": 0, "min_price": 10**12}
+        groups[label]["count"] += 1
+        if s[5] < groups[label]["min_price"]:
+            groups[label]["min_price"] = s[5]
+    out = []
+    for label, icon, _ in SUBTYPES:
+        if label in groups:
+            out.append((label, icon, groups[label]["count"], groups[label]["min_price"]))
+    return out
+
+def svc_in_subtype(bp, platform, subtype):
+    """List service trong 1 subtype, sort giá tăng dần."""
+    rows = svc_list(bp, platform)
+    out = [s for s in rows if detect_subtype(s[2]) == subtype]
+    out.sort(key=lambda s: s[5])
+    return out
+
 
 def order_create(p, uid, svc, link, qty, price, api_o, st="pending"):
     return _q(p, "INSERT INTO smm_orders (user_id,service_id,service_name,platform,link,quantity,price,api_order,status) "
@@ -189,12 +237,10 @@ def _normalize_platform(raw, name, cat):
 
 
 def register(bot, h):
-    """h = {db_path_fn, fmt, cur_admin, get_user, show, back_markup, user_states}"""
     fmt = h["fmt"]; cur_admin = h["cur_admin"]; get_user = h["get_user"]
     show = h["show"]; back_markup = h["back_markup"]; user_states = h["user_states"]
     dbp = h["db_path_fn"]
 
-    # ===== SAFE WRAPPER =====
     def _safe(fn):
         def w(call):
             try: fn(call)
@@ -223,40 +269,66 @@ def register(bot, h):
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_plat|"))
     @_safe
     def _plat(call):
-        parts = call.data.split("|")
-        pl = parts[1]
-        page = int(parts[2]) if len(parts) > 2 else 0
-        bp = dbp(); svcs = svc_list(bp, pl)
-        if not svcs:
+        pl = call.data.split("|", 1)[1]
+        bp = dbp()
+        subs = list_subtypes(bp, pl)
+        if not subs:
             show(call, "Chưa có dịch vụ.", back_markup("smm_home")); return
-        per = 15
+        m = types.InlineKeyboardMarkup(row_width=2)
+        total = sum(x[2] for x in subs)
+        for label, icon, count, minp in subs:
+            m.add(types.InlineKeyboardButton(
+                f"{icon} {label} ({count}) – từ {fmt(minp)}đ",
+                callback_data=f"smm_sub|{pl}|{label}"))
+        m.add(types.InlineKeyboardButton("🔙 Nền tảng", callback_data="smm_home"))
+        show(call, f"<b>🎯 {html.escape(pl)}</b>\n\n"
+                   f"<blockquote>📊 {total} dịch vụ\n👇 Chọn loại:</blockquote>", m)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_sub|"))
+    @_safe
+    def _sub(call):
+        parts = call.data.split("|")
+        pl = parts[1]; sub = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        bp = dbp()
+        svcs = svc_in_subtype(bp, pl, sub)
+        if not svcs:
+            show(call, "Chưa có dịch vụ.", back_markup(f"smm_plat|{pl}")); return
+        per = 10
         tp = max(1, (len(svcs)+per-1)//per)
         page = max(0, min(page, tp-1))
         chunk = svcs[page*per:(page+1)*per]
         m = types.InlineKeyboardMarkup(row_width=1)
         for s in chunk:
-            nm = s[2] if len(s[2]) <= 24 else s[2][:23] + "…"
-            m.add(types.InlineKeyboardButton(f"#{s[0]} {nm} – {fmt(s[5])}đ",
-                  callback_data=f"smm_view|{s[0]}"))
+            nm = s[2] if len(s[2]) <= 32 else s[2][:31] + "…"
+            m.add(types.InlineKeyboardButton(
+                f"{fmt(s[5])}đ/1k · {nm}",
+                callback_data=f"smm_view|{s[0]}"))
         nav = []
-        if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"smm_plat|{pl}|{page-1}"))
+        if page > 0:
+            nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"smm_sub|{pl}|{sub}|{page-1}"))
         nav.append(types.InlineKeyboardButton(f"{page+1}/{tp}", callback_data="noop"))
-        if page < tp-1: nav.append(types.InlineKeyboardButton("➡️", callback_data=f"smm_plat|{pl}|{page+1}"))
+        if page < tp-1:
+            nav.append(types.InlineKeyboardButton("➡️", callback_data=f"smm_sub|{pl}|{sub}|{page+1}"))
         if nav: m.row(*nav)
-        m.add(types.InlineKeyboardButton("🔙 Nền tảng", callback_data="smm_home"))
-        show(call, f"<b>🎯 {html.escape(pl)}</b>\n\n📊 {len(svcs)} dịch vụ | Trang {page+1}/{tp}", m)
+        m.add(types.InlineKeyboardButton("🔙 Loại khác", callback_data=f"smm_plat|{pl}"))
+        show(call, f"<b>🎯 {html.escape(pl)} · {html.escape(sub)}</b>\n\n"
+                   f"<blockquote>📊 {len(svcs)} dịch vụ · Sắp xếp giá rẻ → cao\n"
+                   f"📄 Trang {page+1}/{tp}</blockquote>", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_view|"))
     @_safe
     def _view(call):
         sid = int(call.data.split("|")[1]); s = svc_get(dbp(), sid)
         if not s: show(call, "Không thấy.", back_markup("smm_home")); return
+        sub = detect_subtype(s["name"])
         txt = (f"<b>🎯 {html.escape(s['name'])}</b>\n\n<blockquote>"
-               f"📱 {html.escape(s['platform'])}\n💵 <b>{fmt(s['price'])}đ / 1000</b>\n"
-               f"📊 {fmt(s['min'])} – {fmt(s['max'])}</blockquote>")
+               f"📱 {html.escape(s['platform'])} · {html.escape(sub)}\n"
+               f"💵 <b>{fmt(s['price'])}đ / 1000</b>\n"
+               f"📊 Min: {fmt(s['min'])} · Max: {fmt(s['max'])}</blockquote>")
         m = types.InlineKeyboardMarkup(row_width=1)
         m.add(types.InlineKeyboardButton("🛒 ĐẶT HÀNG", callback_data=f"smm_buy|{sid}"))
-        m.add(types.InlineKeyboardButton("🔙", callback_data=f"smm_plat|{s['platform']}"))
+        m.add(types.InlineKeyboardButton("🔙", callback_data=f"smm_sub|{s['platform']}|{sub}"))
         show(call, txt, m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("smm_buy|"))
@@ -540,8 +612,7 @@ def register(bot, h):
                        "Có thể key không có quyền xem services.",
                  back_markup("adm_smm")); return
         rate = _get_rate(bp); markup = _get_markup(bp)
-        added = 0; sk = 0
-        errs = []
+        added = 0; sk = 0; errs = []
         sample_type = type(resp[0]).__name__
         for i, s in enumerate(resp):
             try:
@@ -554,14 +625,8 @@ def register(bot, h):
                     sk += 1
                     if len(errs) < 5: errs.append(f"[{i}] thiếu service id")
                     continue
-                try:
-                    dup = _q(bp, "SELECT 1 FROM smm_services WHERE api_service=?", (api_id,), "one")
-                    if dup:
-                        sk += 1; continue
-                except Exception as e:
-                    sk += 1
-                    if len(errs) < 5: errs.append(f"[{i}] DB check: {str(e)[:60]}")
-                    continue
+                dup = _q(bp, "SELECT 1 FROM smm_services WHERE api_service=?", (api_id,), "one")
+                if dup: sk += 1; continue
                 nm = str(s.get("name") or "Dịch vụ")[:80]
                 cat = str(s.get("category") or s.get("type") or "Khác")[:30]
                 pl = _normalize_platform(s.get("platform"), nm, cat)
@@ -625,7 +690,8 @@ def register(bot, h):
         if not s: show(call, "Không thấy.", back_markup("adm_smm_list")); return
         profit = s["price"] - s["cost"]
         pct = round(profit*100/s["cost"]) if s["cost"] else 0
-        txt = (f"<b>📦 DV #{sid}</b>\n\n<blockquote>📱 {html.escape(s['platform'])}\n"
+        sub = detect_subtype(s["name"])
+        txt = (f"<b>📦 DV #{sid}</b>\n\n<blockquote>📱 {html.escape(s['platform'])} · {html.escape(sub)}\n"
                f"📝 {html.escape(s['name'])}\n"
                f"🆔 <code>{html.escape(s['api_service'])}</code>\n"
                f"💵 Nhập: <b>{fmt(s['cost'])}đ</b>/1k\n"
