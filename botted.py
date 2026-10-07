@@ -1054,7 +1054,7 @@ def register_all_handlers(bot):
         user_states.pop(m.from_user.id, None)
         bot.send_message(m.chat.id, "✅ Đã hủy. /menu để mở menu.")
 
-    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_", "adm_smm", "adm_data")))
+    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_", "adm_smm", "adm_data", "adm_pick")))
     def cb_router(call):
         data = call.data or ""
         if data == "noop":
