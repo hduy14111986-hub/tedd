@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """BOT TELEGRAM MULTI-TENANT — Groq AI"""
 import os,re,time,html,hmac,sqlite3,logging,threading,urllib.parse as up,json
 from collections import deque
@@ -81,7 +80,9 @@ CREATE TABLE IF NOT EXISTS ipa_files (id INTEGER PRIMARY KEY AUTOINCREMENT,name 
 CREATE TABLE IF NOT EXISTS account_stock (id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER DEFAULT 0,username TEXT NOT NULL,password TEXT DEFAULT '',note TEXT DEFAULT '',status TEXT DEFAULT 'available',sold_to INTEGER DEFAULT 0,sold_at TEXT DEFAULT '',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT DEFAULT '');"""
 MO="""CREATE TABLE IF NOT EXISTS user_bots (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,bot_token TEXT UNIQUE,bot_username TEXT,status TEXT DEFAULT 'active',expires_at TEXT DEFAULT '',plan TEXT DEFAULT 'basic',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"""
-DS={"home_title":"🚀 HỆ THỐNG BOT ĐA NĂNG","home_subtitle":"Data • Proxy • IPA • AI • SMM","welcome_msg":"Chào mừng! Nhắn tin để chat AI.","shop_title":"🛒 CỬA HÀNG","support_text":"Nhắn admin để được hỗ trợ!","footer_note":"Cảm ơn bạn! ❤️","bank_name":"","account_no":"","account_name":"","data_api_url":"","data_api_key":"","data_api_method":"POST","welcome_music":"","welcome_music_caption":"🎵 Nhạc chào mừng!","menu_hidden":"[]","menu_custom":"[]"}
+
+# [CHỨC NĂNG VIDEO MỚI] Đã thêm welcome_video và welcome_video_caption
+DS={"home_title":"🚀 HỆ THỐNG BOT ĐA NĂNG","home_subtitle":"Data • Proxy • IPA • AI • SMM","welcome_msg":"Chào mừng! Nhắn tin để chat AI.","shop_title":"🛒 CỬA HÀNG","support_text":"Nhắn admin để được hỗ trợ!","footer_note":"Cảm ơn bạn! ❤️","bank_name":"","account_no":"","account_name":"","data_api_url":"","data_api_key":"","data_api_method":"POST","welcome_music":"","welcome_music_caption":"🎵 Nhạc chào mừng!","welcome_video":"","welcome_video_caption":"🎬 Video chào mừng!","menu_hidden":"[]","menu_custom":"[]"}
 DP=[("🌐 Data 30K – Không giới hạn",30000,"Data","Gói KHÔNG GIỚI HẠN data 30 ngày."),("🌐 Data 50K – Không giới hạn",50000,"Data","Gói KHÔNG GIỚI HẠN data 30 ngày."),("🌐 Proxy dân cư VN 30 ngày",50000,"Proxy","Proxy dân cư VN, không giới hạn băng thông.")]
 
 def iDB(p=None,main=False):
@@ -618,6 +619,7 @@ def aM():
         m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="cadm_stats"),types.InlineKeyboardButton("⚙️ Cài đặt",callback_data="cadm_settings"))
         m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="cadm_broadcast"),types.InlineKeyboardButton("📤 Xuất DB",callback_data="cadm_export"))
         m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="cadm_menu"),types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
+        m.add(types.InlineKeyboardButton("🎬 Video chào mừng",callback_data="adm_video")) # [CHỨC NĂNG VIDEO MỚI]
         m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
         return m
     m=types.InlineKeyboardMarkup(row_width=2)
@@ -627,7 +629,8 @@ def aM():
     m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"),types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"))
     m.add(types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"),types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"))
     m.add(types.InlineKeyboardButton("💾 Backup",callback_data="adm_backup"),types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="adm_menu"))
-    m.add(types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"),types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"))
+    m.add(types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"),types.InlineKeyboardButton("🎬 Video chào mừng",callback_data="adm_video")) # [CHỨC NĂNG VIDEO MỚI]
+    m.add(types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"))
     m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
     return m
 
@@ -792,6 +795,20 @@ def regH(bot):
         if wc:
             try:bot.send_message(m.chat.id,html.escape(wc))
             except:pass
+        
+        # [CHỨC NĂNG VIDEO MỚI] Bắt đầu gửi video tự động phát
+        vi=sG("welcome_video","")
+        if vi:
+            try:
+                # Gửi dạng animation để tự động phát (auto-play) không cần bấm
+                bot.send_animation(m.chat.id, vi, caption=sG("welcome_video_caption",""))
+            except:
+                try:
+                    # Nếu lỗi animation (do có tiếng), gửi dạng video thường
+                    bot.send_video(m.chat.id, vi, caption=sG("welcome_video_caption",""))
+                except Exception as e:log.warning("video: %s",e)
+        # [CHỨC NĂNG VIDEO MỚI] Kết thúc
+
         mi=sG("welcome_music","")
         if mi:
             try:bot.send_voice(m.chat.id,mi)
@@ -1044,6 +1061,54 @@ def regH(bot):
     def mcai(m):
         sS("welcome_music_caption",m.text.strip()[:200]);US.pop(m.from_user.id,None)
         bot.reply_to(m,"✅ Caption OK",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Nhạc",callback_data="adm_music")))
+
+    # [CHỨC NĂNG VIDEO MỚI] VIDEO MANAGER
+    def _vid(call,no=""):
+        vi=sG("welcome_video","");cp=sG("welcome_video_caption","🎬 Video chào mừng!")
+        st=f"✅ Đã set\n<code>{vi[:50]}...</code>" if vi else "❌ Chưa có video"
+        tx=(f"<b>🎬 VIDEO CHÀO MỪNG</b>\n\n"+(f"<blockquote>{no}</blockquote>\n\n" if no else "")
+            +f"<blockquote>{st}\n💬 <i>{html.escape(cp)}</i></blockquote>\n\n👉 User /start sẽ thấy video tự động phát")
+        kb=types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("🎬 Set video",callback_data="video_set"),types.InlineKeyboardButton("💬 Đổi caption",callback_data="video_caption"))
+        if vi:kb.add(types.InlineKeyboardButton("🗑️ Xóa",callback_data="video_del"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data="cadm_panel" if isC() else "adm_panel"))
+        sh(call,tx,kb)
+
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_video")
+    def vo(call):
+        if call.from_user.id!=cAD():return
+        _vid(call)
+
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="video_set")
+    def vs(call):
+        if call.from_user.id!=cAD():return
+        US[call.from_user.id]="VIDEO_WAIT_FILE"
+        sh(call,"<b>🎬 SET VIDEO</b>\n\nGửi file video (định dạng .mp4) hoặc file GIF/Animation.",bM("adm_video"))
+
+    @bot.message_handler(content_types=["video","animation"],func=lambda m:m.from_user and m.from_user.id==cAD() and US.get(m.from_user.id)=="VIDEO_WAIT_FILE")
+    def vga(m):
+        if m.video:fi=m.video.file_id;ti=m.video.file_name or "Video"
+        elif m.animation:fi=m.animation.file_id;ti=m.animation.file_name or "Animation"
+        else:return
+        sS("welcome_video",fi);US.pop(m.from_user.id,None)
+        bot.reply_to(m,f"✅ Video: <b>{html.escape(ti)}</b>",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Video",callback_data="adm_video")))
+
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="video_del")
+    def vdl(call):
+        if call.from_user.id!=cAD():return
+        sS("welcome_video","");_vid(call,"🗑️ Xóa")
+
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="video_caption")
+    def vcap(call):
+        if call.from_user.id!=cAD():return
+        US[call.from_user.id]="VIDEO_CAPTION"
+        sh(call,"<b>💬 CAPTION VIDEO</b>\n\nGửi caption mới.",bM("adm_video"))
+
+    @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and US.get(m.from_user.id)=="VIDEO_CAPTION" and m.text and not m.text.startswith("/"))
+    def vcai(m):
+        sS("welcome_video_caption",m.text.strip()[:200]);US.pop(m.from_user.id,None)
+        bot.reply_to(m,"✅ Caption OK",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Video",callback_data="adm_video")))
+    # [CHỨC NĂNG VIDEO MỚI] KẾT THÚC
 
     # SHOP MANAGER
     def _sms(call,no=""):
@@ -1798,5 +1863,5 @@ def main():
         serve(app,host="0.0.0.0",port=PT,threads=8)
     except:app.run(host="0.0.0.0",port=PT)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
