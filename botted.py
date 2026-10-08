@@ -939,6 +939,37 @@ def _handle_shop_buy(bot, call, data, uid, u):
     except: pass
 
 def register_all_handlers(bot):
+    # ⚠️ FIX: Bind _ctx trực tiếp vào handler — KHÔNG dùng middleware
+    _meta = None
+    try:
+        if bot.token in child_bot_meta: _meta = child_bot_meta[bot.token]
+    except: pass
+    if _meta:
+        _this_db = _meta["db_path"]; _this_admin = _meta["owner_id"]
+        _this_is_child = True; _this_uname = "@" + _meta["username"]
+    else:
+        _this_db = MAIN_DB; _this_admin = ADMIN_ID
+        _this_is_child = False; _this_uname = BOT_USERNAME
+
+    def _bind():
+        _ctx.db_path = _this_db; _ctx.admin_id = _this_admin
+        _ctx.is_child = _this_is_child; _ctx.bot_instance = bot
+        _ctx.bot_username = _this_uname
+
+    _orig_mh = bot.message_handler; _orig_ch = bot.callback_query_handler
+    def _wrap_deco(orig):
+        def factory(*a, **kw):
+            def deco(handler):
+                def bound(*aa, **kk):
+                    _bind()
+                    return handler(*aa, **kk)
+                bound.__name__ = getattr(handler, "__name__", "h")
+                return orig(*a, **kw)(bound)
+            return deco
+        return factory
+    bot.message_handler = _wrap_deco(_orig_mh)
+    bot.callback_query_handler = _wrap_deco(_orig_ch)
+
     @bot.message_handler(commands=["start", "menu"])
     def cmd_start(m):
         user_states.pop(m.from_user.id, None)
