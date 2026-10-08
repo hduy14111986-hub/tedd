@@ -821,7 +821,7 @@ def regH(bot):
     def cc(m):
         US.pop(m.from_user.id,None);bot.send_message(m.chat.id,"✅ Đã hủy. /menu")
 
-    @bot.callback_query_handler(func=lambda c:(c.data or "") and not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick","menumgr_","music_","shmgr_","adm_u_","adm_o_")) and (c.data or "") not in ("adm_menu","cadm_menu","adm_music","cadm_shop","adm_users","adm_orders"))
+    @bot.callback_query_handler(func=lambda c:(c.data or "") and not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick","menumgr_","music_","video_","shmgr_","adm_u_","adm_o_")) and (c.data or "") not in ("adm_menu","cadm_menu","adm_music","adm_video","cadm_shop","adm_users","adm_orders"))
     def cr(call):
         da=call.data or ""
         if da=="noop":
