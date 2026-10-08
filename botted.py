@@ -66,6 +66,49 @@ child_bot_meta = {}; active_child_bots = {}
 locks = {"child": threading.Lock(), "proxy": threading.Lock(), "backup": threading.Lock()}
 user_states = {}; ai_last_call = {}; ai_hist_lock = threading.Lock(); ai_history = {}
 _ai_model_ok = [None]; webhook_log = deque(maxlen=30)
+_ai_lock = threading.Lock()
+_ai_fail_until = [0]
+
+# ═══════════ TOKEN VALIDATION HELPERS ═══════════
+def _clean_token(token):
+    return re.sub(r"[\s\u200b\u200c\u200d\ufeff\xa0]", "", (token or "").strip())
+
+def _validate_token(token):
+    """Validate token qua HTTP trực tiếp (đáng tin cậy hơn telebot)."""
+    token = _clean_token(token)
+    if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", token):
+        return False, f"Token sai format (độ dài={len(token)})"
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15)
+        try: j = r.json()
+        except Exception:
+            return False, f"HTTP {r.status_code} (không phải JSON): {r.text[:200]}"
+        if j.get("ok"):
+            return True, j.get("result", {})
+        desc = j.get("description") or f"HTTP {r.status_code}"
+        code = j.get("error_code", r.status_code)
+        return False, f"[{code}] {desc}"
+    except requests.exceptions.SSLError as e:
+        return False, f"SSL Error: {str(e)[:200]}"
+    except requests.exceptions.Timeout:
+        return False, "Timeout 15s: Telegram không phản hồi"
+    except requests.exceptions.ConnectionError as e:
+        return False, f"Connection Error: {str(e)[:200]}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
+
+# ═══════════ AI RETRY HELPERS ═══════════
+def _extract_retry_delay(err_str, default=20):
+    m = re.search(r"retry[_\s]?delay['\"]?\s*[:=]\s*['\"]?(\d+)", err_str, re.I)
+    if m: return min(int(m.group(1)) + 2, 90)
+    m = re.search(r"(\d+)\s*seconds", err_str, re.I)
+    if m: return min(int(m.group(1)) + 2, 90)
+    return default
+
+def _is_rate_limit(err_low):
+    return any(k in err_low for k in (
+        "429", "resource_exhausted", "quota", "rate limit", "rate_limit",
+        "too many requests", "overloaded", "503", "unavailable"))
 
 def cur_db():      return getattr(_ctx, "db_path", MAIN_DB)
 def cur_admin():   return getattr(_ctx, "admin_id", ADMIN_ID)
@@ -199,9 +242,8 @@ def bank_info():
     if is_child(): return (setting_get("bank_name") or "—", setting_get("account_no") or "—", setting_get("account_name") or "—")
     return (BANK_NAME, ACCOUNT_NO, ACCOUNT_NAME)
 
-# ══════════════ API DATA (gộp trong file) ══════════════
+# ══════════════ API DATA ══════════════
 def call_ncc(url, key, code, qty, order_ref, method="POST", timeout=30):
-    """Gọi API NCC Data. Trả về (success, data, error)."""
     payload = {"api_key": key, "product_code": code, "quantity": qty, "order_id": order_ref}
     try:
         if method.upper() == "GET":
@@ -224,9 +266,7 @@ def call_ncc(url, key, code, qty, order_ref, method="POST", timeout=30):
         return False, "", str(e)[:150]
 
 def register_data_api_handlers(bot):
-    """Đăng ký các nút admin cho API Data."""
     def _menu(call, note=""):
-        bp = cur_db()
         url = setting_get("data_api_url", "") or "(chưa set)"
         key = setting_get("data_api_key", "")
         kd = (key[:6] + "***") if len(key) > 10 else ("(chưa set)" if not key else "***")
@@ -472,32 +512,36 @@ def child_db_path(token):
     prefix = re.sub(r"[^A-Za-z0-9]", "", token.split(":")[0])[:12]
     return os.path.join(BOTS_DIR, f"bot_{prefix}.db")
 
-def make_child_bot(token, owner_id):
-    try: me = telebot.TeleBot(token).get_me()
-    except Exception as e:
-        log.warning("Token invalid: %s", e); return None
+def make_child_bot(token, owner_id, username=None, me=None):
+    if not username:
+        try:
+            me = telebot.TeleBot(token).get_me()
+            username = me.username
+        except Exception as e:
+            log.warning("Token invalid: %s", e); return None
     db_path = child_db_path(token)
     init_db(db_path, is_main=False)
     bot = telebot.TeleBot(token, parse_mode="HTML", threaded=True, num_threads=2)
-    child_bot_meta[token] = {"owner_id": owner_id, "username": me.username, "db_path": db_path}
+    child_bot_meta[token] = {"owner_id": owner_id, "username": username, "db_path": db_path}
 
     @bot.middleware_handler(update_types=["message", "callback_query"])
     def _mw(b, update):
         _ctx.db_path = db_path; _ctx.admin_id = owner_id
-        _ctx.is_child = True; _ctx.bot_instance = b; _ctx.bot_username = "@" + me.username
+        _ctx.is_child = True; _ctx.bot_instance = b; _ctx.bot_username = "@" + username
 
     register_all_handlers(bot)
     return bot
 
-def start_child_bot(token, owner_id, force=False):
+def start_child_bot(token, owner_id, force=False, username=None, me=None):
     if not force and not bot_is_active(token):
-        log.info("Bot %s hết hạn", token[:15]); return
+        log.info("Bot %s hết hạn", token[:15]); return False
     with locks["child"]:
-        if token in active_child_bots: return
-        b = make_child_bot(token, owner_id)
-        if not b: return
+        if token in active_child_bots: return True
+        b = make_child_bot(token, owner_id, username=username, me=me)
+        if not b: return False
         active_child_bots[token] = b
     threading.Thread(target=run_child_polling, args=(token, b), daemon=True).start()
+    return True
 
 def stop_child_bot(token):
     with locks["child"]:
@@ -711,40 +755,78 @@ def _chunks(text, size=3500):
 def ask_gemini(text, key=None):
     if not ai_client or gtypes is None:
         return "❌ AI chưa cấu hình. Admin kiểm tra GEMINI_API_KEY."
+
+    now_ts = time.time()
+    if now_ts < _ai_fail_until[0]:
+        wait = int(_ai_fail_until[0] - now_ts)
+        return f"⏳ AI đang nghỉ {wait}s do bị giới hạn. Thử lại sau nhé!"
+
     with ai_hist_lock:
         hist = list(ai_history.get(key, ())) if key is not None else []
     contents = [gtypes.Content(role=r, parts=[gtypes.Part(text=t)]) for r, t in hist]
     contents.append(gtypes.Content(role="user", parts=[gtypes.Part(text=text[:6000])]))
     system = _persona_text()
+
     models = []
-    for m in [_ai_model_ok[0], GEMINI_MODEL, "gemini-flash-latest"]:
+    for m in [_ai_model_ok[0], GEMINI_MODEL, "gemini-2.0-flash",
+              "gemini-flash-latest", "gemini-1.5-flash-latest"]:
         if m and m not in models: models.append(m)
+
     last_err = ""
-    for model in models:
-        for use_search in ((True, False) if AI_SEARCH else (False,)):
-            try:
-                kw = dict(system_instruction=system, temperature=0.7, max_output_tokens=2048)
-                if use_search: kw["tools"] = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
-                r = ai_client.models.generate_content(model=model, contents=contents,
-                    config=gtypes.GenerateContentConfig(**kw))
-                ans = (r.text or "").strip()
-                if not ans: last_err = "empty"; continue
-                if key is not None:
-                    with ai_hist_lock:
-                        if len(ai_history) > 5000: ai_history.clear()
-                        dq = ai_history.setdefault(key, deque(maxlen=AI_HISTORY_TURNS * 2))
-                        dq.append(("user", text[:2000])); dq.append(("model", ans[:3000]))
-                _ai_model_ok[0] = model
-                return ans
-            except Exception as e:
-                last_err = str(e); low = last_err.lower()
-                if use_search and ("tool" in low or "search" in low or "grounding" in low): continue
+    with _ai_lock:
+        for model in models:
+            for use_search in ((True, False) if AI_SEARCH else (False,)):
+                for attempt in range(2):
+                    try:
+                        kw = dict(system_instruction=system, temperature=0.7,
+                                  max_output_tokens=2048)
+                        if use_search:
+                            kw["tools"] = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
+                        r = ai_client.models.generate_content(
+                            model=model, contents=contents,
+                            config=gtypes.GenerateContentConfig(**kw))
+                        ans = (r.text or "").strip()
+                        if not ans:
+                            last_err = "empty response"; continue
+                        if key is not None:
+                            with ai_hist_lock:
+                                if len(ai_history) > 5000: ai_history.clear()
+                                dq = ai_history.setdefault(key, deque(maxlen=AI_HISTORY_TURNS * 2))
+                                dq.append(("user", text[:2000]))
+                                dq.append(("model", ans[:3000]))
+                        _ai_model_ok[0] = model
+                        return ans
+                    except Exception as e:
+                        last_err = str(e); low = last_err.lower()
+                        if use_search and any(k in low for k in
+                            ("tool", "search", "grounding", "not supported")):
+                            break
+                        if _is_rate_limit(low):
+                            if attempt == 0:
+                                time.sleep(3)
+                                continue
+                            delay = _extract_retry_delay(last_err, 30)
+                            _ai_fail_until[0] = time.time() + delay
+                            log.warning("AI rate limited, cooldown %ds", delay)
+                            break
+                        break
+                if time.time() < _ai_fail_until[0]:
+                    break
+            if time.time() < _ai_fail_until[0]:
                 break
+
     low = last_err.lower()
-    if "api key not valid" in low or "api_key_invalid" in low: return "❌ API key không hợp lệ!"
-    if "quota" in low or "resource_exhausted" in low or "429" in low: return "⏳ AI quá tải!"
-    if "permission_denied" in low or "403" in low: return "❌ API key bị khóa!"
-    if "not found" in low or "404" in low: return "❌ Model sai. Đổi GEMINI_MODEL!"
+    if "api key not valid" in low or "api_key_invalid" in low:
+        return "❌ API key không hợp lệ! Admin kiểm tra GEMINI_API_KEY."
+    if _is_rate_limit(low):
+        wait = int(_ai_fail_until[0] - time.time())
+        return f"⏳ AI quá tải, nghỉ {max(wait,5)}s. Thử lại sau!"
+    if "permission_denied" in low or "403" in low:
+        return "❌ API key bị khóa!"
+    if "not found" in low or "404" in low:
+        return "❌ Model sai. Đổi GEMINI_MODEL!"
+    if "timeout" in low or "deadline" in low:
+        return "⏳ AI phản hồi chậm. Thử lại!"
     return "🤖 AI đang bận, thử lại sau!"
 
 def reply_ai(bot, m):
@@ -752,12 +834,23 @@ def reply_ai(bot, m):
     text = (m.text or "").strip()
     if len(text) < 2:
         bot.reply_to(m, "Bạn muốn hỏi gì cụ thể hơn không? 😊"); return
+
     now = time.time(); key = (id(bot), uid)
+
+    if now < _ai_fail_until[0]:
+        wait = int(_ai_fail_until[0] - now)
+        bot.reply_to(m, f"⏳ AI đang quá tải. Thử lại sau {wait}s nhé!")
+        return
+
     if now - ai_last_call.get(key, 0) < AI_COOLDOWN:
-        bot.reply_to(m, f"⏳ Đợi {AI_COOLDOWN} giây nhé!"); return
+        remain = AI_COOLDOWN - int(now - ai_last_call.get(key, 0))
+        bot.reply_to(m, f"⏳ Đợi {max(remain,1)} giây nhé!")
+        return
     ai_last_call[key] = now
+
     try: bot.send_chat_action(m.chat.id, "typing")
     except: pass
+
     ans = ask_gemini(text, key=key)
     for i, part in enumerate(_chunks(ans)):
         try:
@@ -961,7 +1054,6 @@ def _handle_shop_buy(bot, call, data, uid, u):
             types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home"))
         show(call, f"⚠️ Thiếu {fmt(p['price']-u['balance'])}đ", kb); return
 
-    # PROXY
     if p["category"] == "Proxy":
         ok, err, info = proxy_buy(uid, pid)
         if not ok:
@@ -984,7 +1076,6 @@ def _handle_shop_buy(bot, call, data, uid, u):
         except: pass
         return
 
-    # DATA có API
     api_url = setting_get("data_api_url")
     api_key = setting_get("data_api_key")
     api_code = (p.get("api_product_code") or "").strip()
@@ -1019,7 +1110,6 @@ def _handle_shop_buy(bot, call, data, uid, u):
         except: pass
         return
 
-    # SP thường
     ok, res = shop_buy(uid, pid)
     if not ok:
         show(call, f"❌ {res}", back_markup("shop_home")); return
@@ -1035,7 +1125,6 @@ def _handle_shop_buy(bot, call, data, uid, u):
         bot.send_message(cur_admin(),
             f"🔔 ĐƠN MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
     except: pass
-
 
 def register_all_handlers(bot):
     @bot.message_handler(commands=["start", "menu"])
@@ -1078,36 +1167,77 @@ def register_all_handlers(bot):
                     reply_markup=back_markup("menu_back"))
             except: pass
 
-    # STATE HANDLERS
+    # ─── STATE HANDLERS ───
     @bot.message_handler(func=lambda m: m.from_user is not None and
         user_states.get(m.from_user.id) == "WAITING_BOT_TOKEN" and m.text and not m.text.startswith("/"))
     def h_token(m):
-        uid = m.from_user.id; tok = m.text.strip()
+        uid = m.from_user.id
+        tok = _clean_token(m.text)
         is_admin = uid == cur_admin()
         try: bot.delete_message(m.chat.id, m.message_id)
         except: pass
         def say(t): bot.send_message(m.chat.id, t, reply_markup=back_markup())
+
+        if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", tok):
+            log.warning("Token format invalid: len=%d", len(tok))
+            say(f"❌ <b>Token sai định dạng!</b>\n\n"
+                f"Format đúng: <code>123456789:ABC-DEF...</code>\n"
+                f"Token bạn gửi ({len(tok)} ký tự):\n<code>{html.escape(tok[:60])}</code>")
+            return
+
         if tok == BOT_TOKEN or token_exists(tok):
             say("❌ Token đã dùng!"); return
-        try: info = telebot.TeleBot(tok).get_me()
-        except: say("❌ Token không hợp lệ!"); return
+
+        ok, result = _validate_token(tok)
+        if not ok:
+            log.error("Token validate FAILED: %s", result)
+            if is_admin:
+                say(f"❌ <b>Token không hợp lệ!</b>\n\n"
+                    f"<b>Chi tiết:</b>\n<code>{html.escape(str(result)[:400])}</code>")
+            else:
+                say("❌ Token không hợp lệ! Vui lòng kiểm tra lại token từ @BotFather.")
+            try:
+                bot.send_message(cur_admin(),
+                    f"⚠️ User <code>{uid}</code> gửi token lỗi:\n"
+                    f"Token: <code>{html.escape(tok[:30])}...</code>\n"
+                    f"Lỗi: <code>{html.escape(str(result)[:250])}</code>")
+            except: pass
+            return
+
+        username = result.get("username", "unknown")
+        log.info("Token OK: @%s (uid=%s)", username, uid)
+
         u = _user_from(m.from_user)
         if not is_admin:
             with db() as c:
                 if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
                              (CREATE_BOT_FEE, uid, CREATE_BOT_FEE)).rowcount == 0:
-                    user_states.pop(uid, None); say(f"❌ Số dư không đủ ({fmt(u['balance'])}đ)"); return
+                    user_states.pop(uid, None)
+                    say(f"❌ Số dư không đủ ({fmt(u['balance'])}đ)"); return
+
         try:
-            exp = save_user_bot(uid, tok, info.username)
-            start_child_bot(tok, uid, force=True)
+            exp = save_user_bot(uid, tok, username)
+            success = start_child_bot(tok, uid, force=True, username=username)
+            if not success:
+                raise Exception("start_child_bot trả về False")
         except Exception as e:
-            log.exception("child init: %s", e)
+            log.exception("child init FAILED: %s", e)
             if not is_admin:
-                with db() as c: c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (CREATE_BOT_FEE, uid))
-            say("❌ Lỗi, tiền hoàn lại."); return
+                with db() as c:
+                    c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (CREATE_BOT_FEE, uid))
+            try:
+                with sqlite3.connect(MAIN_DB) as c:
+                    c.execute("UPDATE user_bots SET status='inactive' WHERE bot_token=?", (tok,))
+                    c.commit()
+            except: pass
+            user_states.pop(uid, None)
+            say(f"❌ Lỗi khởi tạo bot con.\nTiền đã hoàn lại.\n\n<b>Chi tiết:</b>\n"
+                f"<code>{html.escape(str(e)[:200])}</code>"); return
+
         user_states.pop(uid, None)
         paid = "Free (admin)" if is_admin else f"-{fmt(CREATE_BOT_FEE)}đ"
-        say(f"<b>🚀 KÍCH HOẠT OK!</b>\n\n🤖 @{info.username}\n💸 {paid}\n📅 Hạn: <b>{exp}</b>")
+        say(f"<b>🚀 KÍCH HOẠT OK!</b>\n\n🤖 @{username}\n💸 {paid}\n📅 Hạn: <b>{exp}</b>\n\n"
+            f"👉 Nhấn <code>/start</code> trong @{username} để dùng.")
 
     @bot.message_handler(func=lambda m: m.from_user is not None and m.from_user.id == cur_admin()
         and user_states.get(m.from_user.id) == "ADMIN_GRANT" and m.text and not m.text.startswith("/"))
@@ -1240,19 +1370,16 @@ def register_all_handlers(bot):
         try: reply_ai(bot, m)
         except Exception as e:
             log.exception("AI: %s", e); bot.reply_to(m, "🤖 Bot bận!")
-    # SMM
+
     smm.register(bot, {
         "db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
         "get_user": get_or_create_user, "show": show,
         "back_markup": back_markup, "user_states": user_states,
     })
-    # DATA API (inline)
     register_data_api_handlers(bot)
-
 
 # ══════════════ DISPATCH ══════════════
 def _dispatch(bot, call, data, uid, u, is_admin):
-    # MAIN ADMIN
     if data == "adm_panel":
         if not is_admin or is_child(): return
         show(call, admin_text(), admin_markup())
@@ -1317,7 +1444,6 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         for k, v in DEFAULT_SETTINGS.items(): setting_set(k, v)
         show(call, "✅ Đã khôi phục mặc định.", back_markup("adm_ui"))
 
-    # CHILD ADMIN
     elif data == "cadm_panel":
         if not is_admin or not is_child(): return
         show(call, admin_text(), admin_markup())
@@ -1425,7 +1551,6 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         if not is_admin or not is_child(): return
         _cadm_export(call)
 
-    # USER MENU
     elif data == "menu_profile":
         show(call, f"<b>📊 TÀI KHOẢN</b>\n\n<blockquote>"
                    f"🆔 <code>{uid}</code>\n👤 {html.escape(call.from_user.first_name or 'Khách')}\n"
@@ -1475,7 +1600,6 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         user_states.pop(uid, None)
         show(call, home_text(u, is_admin), main_menu(uid))
 
-    # SHOP
     elif data == "shop_home":
         show(call, shop_home_text(), shop_home_markup())
     elif data.startswith("shop_view|"):
@@ -1492,7 +1616,6 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         txt += "</blockquote>"
         show(call, txt, back_markup("shop_home"))
 
-    # IPA
     elif data == "ipa_home":
         items = ipa_list(limit=40)
         if not items:
@@ -1516,7 +1639,6 @@ def _dispatch(bot, call, data, uid, u, is_admin):
             log.warning("send ipa: %s", e)
             bot.send_message(call.message.chat.id, "❌ Không gửi được file.")
 
-    # PROXY
     elif data == "proxy_my":
         rows = proxy_my(uid)
         if not rows:
@@ -1549,7 +1671,6 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         if r[3]: txt += f"🔑 <code>{r[3]}</code>\n"
         txt += f"📡 {r[4]}</blockquote>\n\n<code>{html.escape(line)}</code>"
         show(call, txt, back_markup("proxy_my"))
-
 
 # ADMIN HELPERS
 def _adm_bots_list(call):
@@ -1941,6 +2062,22 @@ def main():
             types.BotCommand("admin", "Admin Panel"),
         ])
     except: pass
+
+    # Warm-up Gemini
+    if ai_client:
+        def _warmup():
+            time.sleep(5)
+            try:
+                r = ai_client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=[gtypes.Content(role="user", parts=[gtypes.Part(text="hi")])],
+                    config=gtypes.GenerateContentConfig(max_output_tokens=5))
+                if r and r.text: _ai_model_ok[0] = GEMINI_MODEL
+                log.info("✅ Gemini warm-up OK: %s", GEMINI_MODEL)
+            except Exception as e:
+                log.warning("Gemini warm-up: %s", str(e)[:120])
+        threading.Thread(target=_warmup, daemon=True).start()
+
     threading.Thread(target=load_child_bots, daemon=True).start()
     threading.Thread(target=run_main_polling, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
