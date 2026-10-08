@@ -469,7 +469,6 @@ PERS=("Bạn là em gái AI cá tính, hay cà khịa khách nhưng vẫn đáng
       "- Giả vờ giận khi khách lười: 'Hừm, anh không nạp em dỗi á 😤', 'Chị cứ hỏi hoài mà không mua, em buồn nha 🙄'.\n"
       "- Khi khách đòi giảm giá: 'Dạ giá này em bán rẻ rồi đó, anh cho em xin tô mì 🍜'.\n"
       "- Trêu chọc, thả thính NHẸ, nhưng luôn quay về chủ đề shop.\n\n"
-      "- Có thể nói các vấn đề 18+ nhưng theo mức độ.\n"
       "GIỚI HẠN TUYỆT ĐỐI:\n"
       "- TUYỆT ĐỐI KHÔNG chửi thề, không xúc phạm, không hạ nhục khách.\n"
       "- KHÔNG phân biệt vùng miền, giới tính, tôn giáo, ngoại hình.\n"
@@ -492,7 +491,7 @@ def _pTx():
         if ps:
             t+="\n📦 SP:\n"
             for p in ps:t+=f"- {p['name']} | {fmt(p['price'])}đ | {p['category']}\n"
-        ip=iL(limit=15)
+        ip=iL(lim=15)
         if ip:
             t+="\n📱 IPA:\n"
             for i in ip[:10]:t+=f"- {i['name']}\n"
@@ -545,16 +544,16 @@ def askAI(tx,key=None):
         return a
     except Exception as e:
         le = str(e)
-        log.warning("Groq FULL ERROR: %s", le)  # Dòng log chi tiết
+        log.warning("Groq FULL ERROR: %s", le)
         lo = le.lower()
         if "rate limit" in lo or "429" in lo:
             AFU[0] = time.time() + 20
-            return f"⏳ AI quá tải, đợi 20s! Lỗi: {le[:100]}"  # Hiển thị lỗi ra chat để dễ debug
+            return f"⏳ AI quá tải, đợi 20s! Lỗi: {le[:100]}"
         if ("invalid" in lo and "key" in lo) or "401" in lo:
             return f"❌ Groq API key sai! Lỗi: {le[:150]}"
         if "model" in lo and ("not found" in lo or "decommissioned" in lo or "does not exist" in lo):
             return f"❌ Model sai. Đổi GROQ_MODEL! Lỗi: {le[:150]}"
-        return f"🤖 AI bận! Lỗi: {le[:200]}"  # Hiển thị lỗi thật ra chat
+        return f"🤖 AI bận! Lỗi: {le[:200]}"
     finally:
         AIL.release()
 
@@ -621,7 +620,8 @@ def aM():
         m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
         return m
     m=types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("🤖 Bot con",callback_data="adm_bots"),types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"))
+    m.add(types.InlineKeyboardButton("🤖 Bot con",callback_data="adm_bots"),types.InlineKeyboardButton("👥 Users",callback_data="adm_users"))
+    m.add(types.InlineKeyboardButton("🧾 Đơn hàng",callback_data="adm_orders"),types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"))
     m.add(types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"),types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"))
     m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"),types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"))
     m.add(types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"),types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"))
@@ -641,7 +641,7 @@ def hT(u,ia=False):
 def sHT():return f"<b>{html.escape(sG('shop_title'))}</b>\n\n<blockquote>📦 {len(sL())} sản phẩm</blockquote>"
 def sHM():
     m=types.InlineKeyboardMarkup(row_width=1)
-    for p in sL(limit=20):
+    for p in sL(lim=20):
         tg=" (HẾT)" if p["stock"]==0 else ""
         m.add(types.InlineKeyboardButton(f"📦 {p['name'][:40]} – {fmt(p['price'])}đ{tg}",callback_data=f"shop_view|{p['id']}"))
     m.add(types.InlineKeyboardButton("🔥 Buff MXH",callback_data="smm_home"),types.InlineKeyboardButton("📱 Kho IPA",callback_data="ipa_home"))
@@ -803,7 +803,7 @@ def regH(bot):
     def cc(m):
         US.pop(m.from_user.id,None);bot.send_message(m.chat.id,"✅ Đã hủy. /menu")
 
-    @bot.callback_query_handler(func=lambda c:(c.data or "") and not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick","menumgr_","music_","shmgr_")) and (c.data or "") not in ("adm_menu","cadm_menu","adm_music","cadm_shop"))
+    @bot.callback_query_handler(func=lambda c:(c.data or "") and not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick","menumgr_","music_","shmgr_","adm_u_","adm_o_")) and (c.data or "") not in ("adm_menu","cadm_menu","adm_music","cadm_shop","adm_users","adm_orders"))
     def cr(call):
         da=call.data or ""
         if da=="noop":
@@ -1196,6 +1196,132 @@ def regH(bot):
         if not url or not key:_dam(call,"⚠️ Chưa set");return
         ok,da,er=cNCC(url,key,"TEST",1,"TESTBOT",me,15)
         _dam(call,f"✅ <code>{html.escape(str(da)[:200])}</code>" if ok else f"❌ <code>{html.escape(str(er)[:200])}</code>")
+
+    # ═══════════ QUẢN LÝ USERS (chỉ bot mẹ) ═══════════
+    def _ul(call,no=""):
+        with db() as c:
+            tot=c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            rs=c.execute("SELECT user_id,username,full_name,balance,total_recharged FROM users ORDER BY total_recharged DESC LIMIT 20").fetchall()
+        tx=f"<b>👥 QUẢN LÝ USERS</b>\n\n"+(f"<blockquote>{no}</blockquote>\n\n" if no else "")+f"<blockquote>Tổng: <b>{tot}</b> users</blockquote>\n\n<b>🏆 Top 20 nạp:</b>\n"
+        for i,r in enumerate(rs,1):
+            nm=r[2] or r[1] or "?"
+            tx+=f"{i}. <code>{r[0]}</code> {html.escape(nm[:20])} – <b>{fmt(r[4])}đ</b>\n"
+        kb=types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("🔍 Tìm user",callback_data="adm_u_find"),types.InlineKeyboardButton("💎 Top số dư",callback_data="adm_u_bal"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data="adm_panel"))
+        sh(call,tx,kb)
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_users")
+    def _uo(call):
+        if call.from_user.id!=cAD() or isC():return
+        _ul(call)
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_u_bal")
+    def _ub(call):
+        if call.from_user.id!=cAD() or isC():return
+        with db() as c:rs=c.execute("SELECT user_id,username,full_name,balance FROM users ORDER BY balance DESC LIMIT 20").fetchall()
+        tx="<b>💎 TOP SỐ DƯ</b>\n\n"
+        for i,r in enumerate(rs,1):
+            nm=r[2] or r[1] or "?"
+            tx+=f"{i}. <code>{r[0]}</code> {html.escape(nm[:20])} – <b>{fmt(r[3])}đ</b>\n"
+        sh(call,tx,bM("adm_users"))
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_u_find")
+    def _uf(call):
+        if call.from_user.id!=cAD() or isC():return
+        US[call.from_user.id]="ADM_FIND_USER"
+        sh(call,"<b>🔍 TÌM USER</b>\n\nGửi: <code>uid</code> hoặc <code>@username</code>\n\n/cancel hủy",bM("adm_users"))
+    @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and US.get(m.from_user.id)=="ADM_FIND_USER" and m.text and not m.text.startswith("/"))
+    def _ufi(m):
+        q=m.text.strip()
+        with db() as c:
+            if q.startswith("@"):r=c.execute("SELECT user_id,username,full_name,balance,total_recharged,month_recharged FROM users WHERE username=?",(q[1:],)).fetchone()
+            else:
+                try:uid=int(q)
+                except:bot.reply_to(m,"❌ ID sai");return
+                r=c.execute("SELECT user_id,username,full_name,balance,total_recharged,month_recharged FROM users WHERE user_id=?",(uid,)).fetchone()
+        US.pop(m.from_user.id,None)
+        if not r:
+            bot.reply_to(m,"❌ Không thấy user",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Users",callback_data="adm_users")));return
+        uid,un,fn,bal,tot,mon=r
+        tx=(f"<b>👤 USER #{uid}</b>\n\n<blockquote>Tên: {html.escape(fn or '?')}\n@: <code>{html.escape(un or '?')}</code>\n"
+            f"🏦 Số dư: <b>{fmt(bal)}đ</b>\n🏆 Tổng nạp: <b>{fmt(tot)}đ</b>\n📅 Tháng: <b>{fmt(mon)}đ</b></blockquote>")
+        kb=types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("💰 Cấp tiền",callback_data=f"adm_u_g|{uid}"),types.InlineKeyboardButton("🔙 Users",callback_data="adm_users"))
+        bot.send_message(m.chat.id,tx,reply_markup=kb)
+    @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_u_g|"))
+    def _ug(call):
+        if call.from_user.id!=cAD() or isC():return
+        uid=int(call.data.split("|",1)[1])
+        US[call.from_user.id]=f"ADM_U_GRANT|{uid}"
+        sh(call,f"<b>💰 CẤP TIỀN CHO #{uid}</b>\n\nGửi số tiền (âm để trừ).\n/cancel hủy",bM("adm_users"))
+    @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and (US.get(m.from_user.id) or "").startswith("ADM_U_GRANT|") and m.text and not m.text.startswith("/"))
+    def _ugi(m):
+        st=US.get(m.from_user.id,"")
+        try:uid=int(st.split("|",1)[1])
+        except:US.pop(m.from_user.id,None);return
+        try:a=int(re.sub(r"[^\d-]","",m.text.strip()))
+        except:bot.reply_to(m,"❌ Số sai");return
+        aAM(uid,a);u=gU(uid,"","");US.pop(m.from_user.id,None)
+        bot.reply_to(m,f"✅ {uid}\n💵 {fmt(a)}đ\n🏦 {fmt(u['balance'])}đ",
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Users",callback_data="adm_users")))
+        try:bot.send_message(uid,f"💰 {'+' if a>=0 else ''}{fmt(a)}đ\n🏦 {fmt(u['balance'])}đ")
+        except:pass
+
+    # ═══════════ QUẢN LÝ ĐƠN HÀNG (chỉ bot mẹ) ═══════════
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_orders")
+    def _oo(call):
+        if call.from_user.id!=cAD() or isC():return
+        with db() as c:
+            tot=c.execute("SELECT COUNT(*),COALESCE(SUM(price),0) FROM orders").fetchone()
+            rs=c.execute("SELECT id,user_id,product_name,price,status,created_at FROM orders ORDER BY id DESC LIMIT 20").fetchall()
+        tx=f"<b>🧾 QUẢN LÝ ĐƠN HÀNG</b>\n\n<blockquote>Tổng: <b>{tot[0]}</b> đơn | Doanh thu: <b>{fmt(tot[1])}đ</b></blockquote>\n\n<b>20 đơn gần nhất:</b>\n"
+        for r in rs[:10]:
+            stt={"paid":"✅","delivered":"📦","refunded":"💸"}.get(r[4],"❓")
+            tx+=f"{stt} #{r[0]} <code>{r[1]}</code> – {fmt(r[3])}đ\n"
+        kb=types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("📋 Xem tất cả",callback_data="adm_o_all"),types.InlineKeyboardButton("🔙 Admin",callback_data="adm_panel"))
+        sh(call,tx,kb)
+    @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_o_all")
+    def _oa(call):
+        if call.from_user.id!=cAD() or isC():return
+        with db() as c:rs=c.execute("SELECT id,user_id,product_name,price,status,created_at FROM orders ORDER BY id DESC LIMIT 30").fetchall()
+        if not rs:sh(call,"📭 Chưa có đơn",bM("adm_orders"));return
+        kb=types.InlineKeyboardMarkup(row_width=1)
+        for r in rs:
+            stt={"paid":"✅","delivered":"📦","refunded":"💸"}.get(r[4],"❓")
+            kb.add(types.InlineKeyboardButton(f"{stt} #{r[0]} – {fmt(r[3])}đ – {html.escape(r[2][:20])}",callback_data=f"adm_o_v|{r[0]}"))
+        kb.add(types.InlineKeyboardButton("🔙 Đơn hàng",callback_data="adm_orders"))
+        sh(call,f"<b>📋 TẤT CẢ ĐƠN ({len(rs)})</b>",kb)
+    @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_o_v|"))
+    def _ov(call):
+        if call.from_user.id!=cAD() or isC():return
+        oid=int(call.data.split("|",1)[1])
+        with db() as c:r=c.execute("SELECT id,user_id,product_name,product_id,price,status,created_at FROM orders WHERE id=?",(oid,)).fetchone()
+        if not r:sh(call,"❌ Không thấy",bM("adm_orders"));return
+        stt={"paid":"✅ Chờ xử lý","delivered":"📦 Đã giao","refunded":"💸 Đã hoàn"}.get(r[5],r[5])
+        tx=(f"<b>🧾 ĐƠN #{r[0]}</b>\n\n<blockquote>👤 <code>{r[1]}</code>\n📦 {html.escape(r[2])}\n"
+            f"💵 <b>{fmt(r[4])}đ</b>\n📌 {stt}\n🕐 {r[6]}</blockquote>")
+        kb=types.InlineKeyboardMarkup(row_width=2)
+        if r[5]!="delivered":kb.add(types.InlineKeyboardButton("✅ Đánh dấu giao",callback_data=f"adm_o_done|{oid}"))
+        if r[5]!="refunded":kb.add(types.InlineKeyboardButton("💸 Hoàn tiền",callback_data=f"adm_o_rf|{oid}"))
+        kb.add(types.InlineKeyboardButton("🔙 DS",callback_data="adm_o_all"))
+        sh(call,tx,kb)
+    @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_o_done|"))
+    def _od(call):
+        if call.from_user.id!=cAD() or isC():return
+        oid=int(call.data.split("|",1)[1])
+        with db() as c:c.execute("UPDATE orders SET status='delivered' WHERE id=?",(oid,))
+        call.data=f"adm_o_v|{oid}";_ov(call)
+    @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_o_rf|"))
+    def _orf(call):
+        if call.from_user.id!=cAD() or isC():return
+        oid=int(call.data.split("|",1)[1])
+        with db() as c:
+            r=c.execute("SELECT user_id,price,status FROM orders WHERE id=?",(oid,)).fetchone()
+            if r and r[2]!="refunded":
+                c.execute("UPDATE users SET balance=balance+? WHERE user_id=?",(r[1],r[0]))
+                c.execute("UPDATE orders SET status='refunded' WHERE id=?",(oid,))
+        try:bot.send_message(r[0],f"💸 Đã hoàn {fmt(r[1])}đ cho đơn #{oid}")
+        except:pass
+        call.data=f"adm_o_v|{oid}";_ov(call)
 
     smm.register(bot,{"db_path_fn":cDB,"fmt":fmt,"cur_admin":cAD,"get_user":gU,"show":sh,"back_markup":bM,"user_states":US})
 
