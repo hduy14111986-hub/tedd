@@ -470,7 +470,7 @@ PERS=("Bạn là em người yêu em gái AI cá tính, hay cà khịa khách nh
       "- Giả vờ giận khi khách lười: 'Hừm, anh không nạp em dỗi á 😤', 'Chị cứ hỏi hoài mà không mua, em buồn nha 🙄'.\n"
       "- Khi khách đòi giảm giá: 'Dạ giá này em bán rẻ rồi đó, anh cho em xin tô mì 🍜'.\n"
       "- Trêu chọc, thả thính NHẸ, nhưng luôn quay về chủ đề shop.\n\n"
-      "- Chỉ trả lời các câu hỏi 18+ nhẹ nhàng./n"
+      "- Trả lời các câu hỏi 18+ nhẹ nhàng./n"
       "GIỚI HẠN TUYỆT ĐỐI:\n"
       "- TUYỆT ĐỐI KHÔNG xúc phạm, không hạ nhục khách.\n"
       "- KHÔNG phân biệt vùng miền, giới tính, tôn giáo, ngoại hình.\n"
@@ -800,11 +800,9 @@ def regH(bot):
         vi=sG("welcome_video","")
         if vi:
             try:
-                # Gửi dạng animation để tự động phát (auto-play) không cần bấm
                 bot.send_animation(m.chat.id, vi, caption=sG("welcome_video_caption",""))
             except:
                 try:
-                    # Nếu lỗi animation (do có tiếng), gửi dạng video thường
                     bot.send_video(m.chat.id, vi, caption=sG("welcome_video_caption",""))
                 except Exception as e:log.warning("video: %s",e)
         # [CHỨC NĂNG VIDEO MỚI] Kết thúc
@@ -1085,11 +1083,18 @@ def regH(bot):
         US[call.from_user.id]="VIDEO_WAIT_FILE"
         sh(call,"<b>🎬 SET VIDEO</b>\n\nGửi file video (định dạng .mp4) hoặc file GIF/Animation.",bM("adm_video"))
 
-    @bot.message_handler(content_types=["video","animation"],func=lambda m:m.from_user and m.from_user.id==cAD() and US.get(m.from_user.id)=="VIDEO_WAIT_FILE")
+    @bot.message_handler(content_types=["video","animation","document"],func=lambda m:m.from_user and US.get(m.from_user.id)=="VIDEO_WAIT_FILE")
     def vga(m):
-        if m.video:fi=m.video.file_id;ti=m.video.file_name or "Video"
-        elif m.animation:fi=m.animation.file_id;ti=m.animation.file_name or "Animation"
-        else:return
+        if m.from_user.id != cAD(): return
+        fi=None;ti=None
+        if m.video:
+            fi=m.video.file_id;ti=m.video.file_name or "Video"
+        elif m.animation:
+            fi=m.animation.file_id;ti=m.animation.file_name or "Animation"
+        elif m.document:
+            if (m.document.mime_type or "").startswith("video/") or (m.document.file_name or "").lower().endswith((".mp4",".mov",".avi")):
+                fi=m.document.file_id;ti=m.document.file_name or "Video Document"
+        if not fi:return
         sS("welcome_video",fi);US.pop(m.from_user.id,None)
         bot.reply_to(m,f"✅ Video: <b>{html.escape(ti)}</b>",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Video",callback_data="adm_video")))
 
@@ -1104,8 +1109,9 @@ def regH(bot):
         US[call.from_user.id]="VIDEO_CAPTION"
         sh(call,"<b>💬 CAPTION VIDEO</b>\n\nGửi caption mới.",bM("adm_video"))
 
-    @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and US.get(m.from_user.id)=="VIDEO_CAPTION" and m.text and not m.text.startswith("/"))
+    @bot.message_handler(func=lambda m:m.from_user and US.get(m.from_user.id)=="VIDEO_CAPTION" and m.text and not m.text.startswith("/"))
     def vcai(m):
+        if m.from_user.id != cAD(): return
         sS("welcome_video_caption",m.text.strip()[:200]);US.pop(m.from_user.id,None)
         bot.reply_to(m,"✅ Caption OK",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Video",callback_data="adm_video")))
     # [CHỨC NĂNG VIDEO MỚI] KẾT THÚC
