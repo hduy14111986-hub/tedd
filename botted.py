@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""BOT TELEGRAM MULTI-TENANT"""
+"""BOT TELEGRAM MULTI-TENANT — Groq AI"""
 import os,re,time,html,hmac,sqlite3,logging,threading,urllib.parse as up,json
 from collections import deque
 from contextlib import contextmanager
@@ -10,18 +10,17 @@ from telebot.apihelper import ApiTelegramException as ApiEx
 from flask import Flask,request,jsonify
 telebot.apihelper.ENABLE_MIDDLEWARE=True
 try:
-    from google import genai
-    from google.genai import types as gt
-except: genai=None;gt=None
+    from openai import OpenAI
+except: OpenAI=None
 import smm
 
 E=lambda k,d="":os.environ.get(k,d).strip()
 BT=E("BOT_TOKEN") or exit("Thiếu BOT_TOKEN")
-GK=E("GEMINI_API_KEY");GM=E("GEMINI_MODEL","gemini-flash-latest")
+GQ=E("GROQ_API_KEY");GQM=E("GROQ_MODEL","llama-3.3-70b-versatile")
 SK=E("SEPAY_API_KEY");AID=int(E("ADMIN_ID","0"));BUN=E("BOT_USERNAME","@bot")
 BN=E("BANK_NAME","TPBank");AN=E("ACCOUNT_NO","");ACN=E("ACCOUNT_NAME","")
 CBF=int(E("CREATE_BOT_FEE","20000"));BRD=int(E("BOT_RENT_DAYS","30"));BRF=int(E("BOT_RENEW_FEE","15000"))
-AIC=int(E("AI_COOLDOWN","2"));AIS=E("AI_SEARCH","0")=="1"
+AIC=int(E("AI_COOLDOWN","1"));AIS=False
 DD=E("DATA_DIR") or ("/var/data" if os.path.isdir("/var/data") else ".")
 MDB=os.path.join(DD,"main.db");BD=os.path.join(DD,"bots");PT=int(E("PORT","8080"))
 BCI=int(E("BACKUP_CHAT_ID","0"));BIN=int(E("BACKUP_INTERVAL","1800"));BK=5
@@ -38,14 +37,11 @@ log=logging.getLogger("bot")
 MB=telebot.TeleBot(BT,parse_mode="HTML",threaded=True,num_threads=8)
 app=Flask(__name__)
 AICl=None
-if genai and GK:
+if OpenAI and GQ:
     try:
-        AICl=genai.Client(api_key=GK,http_options=gt.HttpOptions(timeout=45000))
-        log.info("✅ Gemini OK")
-    except Exception as e:
-        log.warning("G init: %s",e)
-        try:AICl=genai.Client(api_key=GK)
-        except:pass
+        AICl=OpenAI(api_key=GQ,base_url="https://api.groq.com/openai/v1",timeout=45)
+        log.info("✅ Groq OK — %s",GQM)
+    except Exception as e:log.warning("Groq init: %s",e)
 _ctx=threading.local();CBM={};ACB={}
 LK={"c":threading.Lock(),"p":threading.Lock(),"b":threading.Lock()}
 US={};ALC={};AHL=threading.Lock();AH={};AMO=[None];WL=deque(maxlen=30);AIL=threading.Lock();AFU=[0];PC={"t":"","time":0}
@@ -61,12 +57,7 @@ def vTK(t):
         return False,f"[{j.get('error_code',r.status_code)}] {j.get('description','?')}"
     except requests.exceptions.Timeout:return False,"Timeout 15s"
     except Exception as e:return False,f"{type(e).__name__}: {str(e)[:150]}"
-def exD(s,d=20):
-    m=re.search(r"retry[_\s]?delay['\"]?\s*[:=]\s*['\"]?(\d+)",s,re.I)
-    if m:return min(int(m.group(1))+2,90)
-    m=re.search(r"(\d+)\s*seconds",s,re.I)
-    return min(int(m.group(1))+2,90) if m else d
-def isRL(s):return any(k in s for k in ("429","resource_exhausted","quota","rate limit","overloaded","503","unavailable"))
+def isRL(s):return any(k in s for k in ("429","rate limit","overloaded","503","unavailable","quota"))
 def cDB():return getattr(_ctx,"db_path",MDB)
 def cAD():return getattr(_ctx,"admin_id",AID)
 def cB():return getattr(_ctx,"bot_instance",None) or MB
@@ -513,58 +504,44 @@ def chk(t,s=3500):
         c=(c+"\n\n"+p) if c else p
     if c:o.append(c)
     return o or [""]
+
 def askAI(tx,key=None):
-    if not AICl or gt is None:return "❌ AI chưa cấu hình."
+    if not AICl:return "❌ AI chưa cấu hình. Admin kiểm tra GROQ_API_KEY."
     n=time.time()
     if n<AFU[0]:return f"⏳ AI nghỉ {int(AFU[0]-n)}s!"
     with AHL:hs=list(AH.get(key,())) if key is not None else []
-    cs=[gt.Content(role=r,parts=[gt.Part(text=t)]) for r,t in hs]
-    cs.append(gt.Content(role="user",parts=[gt.Part(text=tx[:6000])]))
-    sys=_pTx()
-    ms=[]
-    for m in [AMO[0],GM,"gemini-flash-latest","gemini-2.5-flash","gemini-2.0-flash"]:
-        if m and m not in ms:ms.append(m)
+    msgs=[{"role":"system","content":_pTx()}]
+    for r,t in hs:msgs.append({"role":"assistant" if r=="model" else r,"content":t})
+    msgs.append({"role":"user","content":tx[:6000]})
     le=""
     acq=AIL.acquire(timeout=8)
     if not acq:return "⏳ Bot bận, đợi 3-5s!"
     try:
-        for m in ms:
-            for us in ((True,False) if AIS else (False,)):
-                for at in range(2):
-                    try:
-                        kw=dict(system_instruction=sys,temperature=0.85,top_p=0.95,max_output_tokens=4096)
-                        if us:kw["tools"]=[gt.Tool(google_search=gt.GoogleSearch())]
-                        r=AICl.models.generate_content(model=m,contents=cs,config=gt.GenerateContentConfig(**kw))
-                        a=(r.text or "").strip()
-                        if not a:le="empty";continue
-                        if key is not None:
-                            with AHL:
-                                if len(AH)>5000:AH.clear()
-                                dq=AH.setdefault(key,deque(maxlen=AH_T*2))
-                                dq.append(("user",tx[:2000]));dq.append(("model",a[:3000]))
-                        AMO[0]=m;return a
-                    except Exception as e:
-                        le=str(e);lo=le.lower()
-                        if us and any(k in lo for k in ("tool","search","grounding","not supported","invalid")):break
-                        if isRL(lo):
-                            if at==0:time.sleep(2);continue
-                            AFU[0]=time.time()+exD(le,30);break
-                        break
-                if time.time()<AFU[0]:break
-            if time.time()<AFU[0]:break
+        r=AICl.chat.completions.create(model=GQM,messages=msgs,temperature=0.85,max_tokens=4096)
+        a=(r.choices[0].message.content or "").strip()
+        if not a:return "🤖 AI trả về rỗng!"
+        if key is not None:
+            with AHL:
+                if len(AH)>5000:AH.clear()
+                dq=AH.setdefault(key,deque(maxlen=AH_T*2))
+                dq.append(("user",tx[:2000]));dq.append(("model",a[:3000]))
+        return a
+    except Exception as e:
+        le=str(e);lo=le.lower();log.warning("Groq: %s",le)
+        if "rate limit" in lo or "429" in lo:
+            AFU[0]=time.time()+20;return "⏳ AI quá tải, đợi 20s!"
+        if ("invalid" in lo and "key" in lo) or "401" in lo:return "❌ Groq API key sai!"
+        if "model" in lo and ("not found" in lo or "decommissioned" in lo or "does not exist" in lo):return "❌ Model sai. Đổi GROQ_MODEL!"
+        return "🤖 AI bận, thử lại!"
     finally:AIL.release()
-    lo=le.lower()
-    if "api key not valid" in lo or "api_key_invalid" in lo:return "❌ API key sai!"
-    if isRL(lo):return f"⏳ AI quá tải, đợi {max(int(AFU[0]-time.time()),5)}s!"
-    if "not found" in lo or "404" in lo:return "❌ Model sai!"
-    return "🤖 AI bận, thử lại!"
+
 def repAI(b,m):
     uid=m.from_user.id if m.from_user else m.chat.id
     tx=(m.text or "").strip()
     if len(tx)<1:return
     n=time.time();k=(id(b),uid)
     if n<AFU[0]:b.reply_to(m,f"⏳ AI quá tải, đợi {int(AFU[0]-n)}s!");return
-    if n-ALC.get(k,0)<1:return
+    if n-ALC.get(k,0)<AIC:return
     ALC[k]=n
     try:b.send_chat_action(m.chat.id,"typing")
     except:pass
@@ -612,33 +589,21 @@ def mM(uid=None,bot=None):
 def aM():
     if isC():
         m=types.InlineKeyboardMarkup(row_width=2)
-        m.add(types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"),
-              types.InlineKeyboardButton("📱 Kho IPA",callback_data="cadm_ipa"))
-        m.add(types.InlineKeyboardButton("🌐 Proxy",callback_data="cadm_proxy"),
-              types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"))
-        m.add(types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"),
-              types.InlineKeyboardButton("💰 Cấp tiền",callback_data="cadm_grant"))
-        m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="cadm_stats"),
-              types.InlineKeyboardButton("⚙️ Cài đặt",callback_data="cadm_settings"))
-        m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="cadm_broadcast"),
-              types.InlineKeyboardButton("📤 Xuất DB",callback_data="cadm_export"))
-        m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="cadm_menu"),
-              types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
+        m.add(types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"),types.InlineKeyboardButton("📱 Kho IPA",callback_data="cadm_ipa"))
+        m.add(types.InlineKeyboardButton("🌐 Proxy",callback_data="cadm_proxy"),types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"))
+        m.add(types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"),types.InlineKeyboardButton("💰 Cấp tiền",callback_data="cadm_grant"))
+        m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="cadm_stats"),types.InlineKeyboardButton("⚙️ Cài đặt",callback_data="cadm_settings"))
+        m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="cadm_broadcast"),types.InlineKeyboardButton("📤 Xuất DB",callback_data="cadm_export"))
+        m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="cadm_menu"),types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
         m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
         return m
     m=types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"),
-          types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"))
-    m.add(types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"),
-          types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"))
-    m.add(types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"),
-          types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"))
-    m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"),
-          types.InlineKeyboardButton("💾 Backup",callback_data="adm_backup"))
-    m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="adm_menu"),
-          types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
-    m.add(types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"),
-          types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
+    m.add(types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"),types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"))
+    m.add(types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"),types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"))
+    m.add(types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"),types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"))
+    m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"),types.InlineKeyboardButton("💾 Backup",callback_data="adm_backup"))
+    m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="adm_menu"),types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
+    m.add(types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"),types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
     return m
 
 def hT(u,ia=False):
@@ -649,17 +614,14 @@ def hT(u,ia=False):
     if ia:bs+="\n\n👑 <b>Bạn là ADMIN</b>"
     if fo:bs+=f"\n\n<i>{html.escape(fo)}</i>"
     return bs
-def sHT():
-    return f"<b>{html.escape(sG('shop_title'))}</b>\n\n<blockquote>📦 {len(sL())} sản phẩm</blockquote>"
+def sHT():return f"<b>{html.escape(sG('shop_title'))}</b>\n\n<blockquote>📦 {len(sL())} sản phẩm</blockquote>"
 def sHM():
     m=types.InlineKeyboardMarkup(row_width=1)
     for p in sL(limit=20):
         tg=" (HẾT)" if p["stock"]==0 else ""
         m.add(types.InlineKeyboardButton(f"📦 {p['name'][:40]} – {fmt(p['price'])}đ{tg}",callback_data=f"shop_view|{p['id']}"))
-    m.add(types.InlineKeyboardButton("🔥 Buff MXH",callback_data="smm_home"),
-          types.InlineKeyboardButton("📱 Kho IPA",callback_data="ipa_home"))
-    m.add(types.InlineKeyboardButton("🛍 Đơn của tôi",callback_data="shop_myorders"),
-          types.InlineKeyboardButton("🌐 Proxy",callback_data="proxy_my"))
+    m.add(types.InlineKeyboardButton("🔥 Buff MXH",callback_data="smm_home"),types.InlineKeyboardButton("📱 Kho IPA",callback_data="ipa_home"))
+    m.add(types.InlineKeyboardButton("🛍 Đơn của tôi",callback_data="shop_myorders"),types.InlineKeyboardButton("🌐 Proxy",callback_data="proxy_my"))
     m.add(types.InlineKeyboardButton("🔙 Menu",callback_data="menu_back"))
     return m
 def pDT(p):
@@ -807,8 +769,10 @@ def regH(bot):
             except:pass
         mi=sG("welcome_music","")
         if mi:
-            try:bot.send_audio(m.chat.id,mi,caption=sG("welcome_music_caption","🎵 Nhạc chào mừng!"))
-            except Exception as e:log.warning("music: %s",e)
+            try:bot.send_voice(m.chat.id,mi)
+            except:
+                try:bot.send_audio(m.chat.id,mi,caption=sG("welcome_music_caption","🎵 Nhạc chào mừng!"))
+                except Exception as e:log.warning("music: %s",e)
         bot.send_message(m.chat.id,hT(u,m.from_user.id==cAD()),reply_markup=mM(m.from_user.id,bot=bot))
 
     @bot.message_handler(commands=["cancel"])
@@ -1209,11 +1173,7 @@ def regH(bot):
         ok,da,er=cNCC(url,key,"TEST",1,"TESTBOT",me,15)
         _dam(call,f"✅ <code>{html.escape(str(da)[:200])}</code>" if ok else f"❌ <code>{html.escape(str(er)[:200])}</code>")
 
-    regDA(bot)
     smm.register(bot,{"db_path_fn":cDB,"fmt":fmt,"cur_admin":cAD,"get_user":gU,"show":sh,"back_markup":bM,"user_states":US})
-
-def regDA(bot):
-    pass  # merged into regH
 
 def dsp(bot,call,da,uid,u,ia):
     if da=="adm_panel":
@@ -1670,7 +1630,7 @@ def main():
     iDB(MDB,main=True)
     regH(MB)
     if not SK:log.warning("⚠️ Chưa SEPAY_API_KEY")
-    if not GK:log.warning("⚠️ Chưa GEMINI_API_KEY")
+    if not GQ:log.warning("⚠️ Chưa GROQ_API_KEY")
     if not BCI:log.warning("⚠️ Chưa BACKUP_CHAT_ID")
     try:
         MB.set_my_commands([types.BotCommand("start","Menu"),types.BotCommand("menu","Menu"),types.BotCommand("admin","Admin")])
