@@ -527,13 +527,19 @@ def askAI(tx,key=None):
                 dq.append(("user",tx[:2000]));dq.append(("model",a[:3000]))
         return a
     except Exception as e:
-        le=str(e);lo=le.lower();log.warning("Groq: %s",le)
+        le = str(e)
+        log.warning("Groq FULL ERROR: %s", le)  # Dòng log chi tiết
+        lo = le.lower()
         if "rate limit" in lo or "429" in lo:
-            AFU[0]=time.time()+20;return "⏳ AI quá tải, đợi 20s!"
-        if ("invalid" in lo and "key" in lo) or "401" in lo:return "❌ Groq API key sai!"
-        if "model" in lo and ("not found" in lo or "decommissioned" in lo or "does not exist" in lo):return "❌ Model sai. Đổi GROQ_MODEL!"
-        return "🤖 AI bận, thử lại!"
-    finally:AIL.release()
+            AFU[0] = time.time() + 20
+            return f"⏳ AI quá tải, đợi 20s! Lỗi: {le[:100]}"  # Hiển thị lỗi ra chat để dễ debug
+        if ("invalid" in lo and "key" in lo) or "401" in lo:
+            return f"❌ Groq API key sai! Lỗi: {le[:150]}"
+        if "model" in lo and ("not found" in lo or "decommissioned" in lo or "does not exist" in lo):
+            return f"❌ Model sai. Đổi GROQ_MODEL! Lỗi: {le[:150]}"
+        return f"🤖 AI bận! Lỗi: {le[:200]}"  # Hiển thị lỗi thật ra chat
+    finally:
+        AIL.release()
 
 def repAI(b,m):
     uid=m.from_user.id if m.from_user else m.chat.id
