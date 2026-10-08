@@ -8,6 +8,9 @@ import requests, telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
 from flask import Flask, request, jsonify
+
+# ⚠️ BẮT BUỘC: Bật middleware TRƯỚC khi tạo TeleBot
+telebot.apihelper.ENABLE_MIDDLEWARE = True
 try:
     from google import genai
     from google.genai import types as gtypes
