@@ -788,7 +788,7 @@ def regH(bot):
         return f
     bot.message_handler=_wr(_om);bot.callback_query_handler=_wr(_oc)
 
-       @bot.message_handler(commands=["start","menu"])
+    @bot.message_handler(commands=["start","menu"])
     def cs(m):
         US.pop(m.from_user.id,None);u=_uF(m.from_user)
         
