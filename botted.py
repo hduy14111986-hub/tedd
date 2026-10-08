@@ -8,8 +8,6 @@ import requests, telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
 from flask import Flask, request, jsonify
-
-# ⚠️ BẮT BUỘC: Bật middleware TRƯỚC khi tạo TeleBot
 telebot.apihelper.ENABLE_MIDDLEWARE = True
 try:
     from google import genai
@@ -63,9 +61,9 @@ if genai and GEMINI_API_KEY:
         ai_client = genai.Client(api_key=GEMINI_API_KEY, http_options=_http_opts)
         log.info("✅ Gemini client init OK")
     except Exception as e:
-        log.warning("Gemini init with HttpOptions fail: %s", e)
+        log.warning("Gemini init fail: %s", e)
         try: ai_client = genai.Client(api_key=GEMINI_API_KEY)
-        except Exception as e2: log.warning("Gemini init fallback fail: %s", e2)
+        except Exception as e2: log.warning("Gemini fallback fail: %s", e2)
 
 _ctx = threading.local()
 child_bot_meta = {}; active_child_bots = {}
@@ -84,7 +82,7 @@ def _validate_token(tok):
     try:
         r = requests.get(f"https://api.telegram.org/bot{tok}/getMe", timeout=15)
         try: j = r.json()
-        except: return False, f"HTTP {r.status_code} (không phải JSON): {r.text[:200]}"
+        except: return False, f"HTTP {r.status_code}: {r.text[:200]}"
         if j.get("ok"): return True, j.get("result", {})
         return False, f"[{j.get('error_code', r.status_code)}] {j.get('description', 'Unknown')}"
     except requests.exceptions.SSLError as e: return False, f"SSL Error: {str(e)[:200]}"
@@ -235,6 +233,7 @@ def _get_hidden_btns():
 def _get_custom_btns():
     try: return json.loads(setting_get("menu_custom", "[]"))
     except: return []
+
 def fmt(n): return f"{int(n):,}".replace(",", ".")
 def bank_info():
     if is_child(): return (setting_get("bank_name") or "—", setting_get("account_no") or "—", setting_get("account_name") or "—")
@@ -438,10 +437,6 @@ def make_child_bot(token, owner_id, username=None):
     db_path = child_db_path(token); init_db(db_path, is_main=False)
     bot = telebot.TeleBot(token, parse_mode="HTML", threaded=True, num_threads=2)
     child_bot_meta[token] = {"owner_id": owner_id, "username": username, "db_path": db_path}
-    @bot.middleware_handler(update_types=["message", "callback_query"])
-    def _mw(b, update):
-        _ctx.db_path = db_path; _ctx.admin_id = owner_id
-        _ctx.is_child = True; _ctx.bot_instance = b; _ctx.bot_username = "@" + username
     register_all_handlers(bot)
     return bot
 
@@ -670,7 +665,7 @@ def ask_gemini(text, key=None):
         if m and m not in models: models.append(m)
     last_err = ""
     acquired = _ai_lock.acquire(timeout=8)
-    if not acquired: return "⏳ Bot đang bận xử lý câu trước, đợi 3-5s rồi hỏi lại nhé!"
+    if not acquired: return "⏳ Bot đang bận, đợi 3-5s rồi hỏi lại nhé!"
     try:
         for model in models:
             for use_search in ((True, False) if AI_SEARCH else (False,)):
@@ -735,6 +730,39 @@ def reply_ai(bot, m):
 def back_markup(cb="menu_back"):
     return types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data=cb))
 
+def main_menu(uid=None, bot=None):
+    if bot is None: bot = cur_bot()
+    _is_child = False; _owner_id = ADMIN_ID
+    try:
+        if bot.token in child_bot_meta:
+            _is_child = True; _owner_id = child_bot_meta[bot.token]["owner_id"]
+    except: pass
+    hidden = _get_hidden_btns(); customs = _get_custom_btns()
+    m = types.InlineKeyboardMarkup(row_width=2)
+    all_btns = [
+        ("profile", types.InlineKeyboardButton("👤 Tài khoản", callback_data="menu_profile")),
+        ("shop",    types.InlineKeyboardButton("🛒 Cửa Hàng", callback_data="shop_home")),
+        ("smm",     types.InlineKeyboardButton("🔥 Buff MXH", callback_data="smm_home")),
+        ("ipa",     types.InlineKeyboardButton("📱 Kho IPA", callback_data="ipa_home")),
+        ("proxy",   types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my")),
+        ("deposit", types.InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_deposit")),
+    ]
+    if not _is_child:
+        all_btns += [
+            ("create_bot", types.InlineKeyboardButton(f"🤖 Thuê Bot ({CREATE_BOT_FEE//1000}k)", callback_data="menu_create_bot")),
+            ("mybots",    types.InlineKeyboardButton("🤖 Bot của tôi", callback_data="mybots")),
+            ("donate",    types.InlineKeyboardButton("❤️ Donate", callback_data="menu_donate")),
+        ]
+    all_btns.append(("support", types.InlineKeyboardButton("🎛️ Hỗ trợ", callback_data="menu_support")))
+    for key, btn in all_btns:
+        if key not in hidden: m.add(btn)
+    for c in customs:
+        try: m.add(types.InlineKeyboardButton(c["label"][:60], url=c["url"]))
+        except: pass
+    if uid == _owner_id:
+        m.add(types.InlineKeyboardButton("👑 ADMIN PANEL", callback_data="cadm_panel" if _is_child else "adm_panel"))
+    return m
+
 def admin_markup():
     if is_child():
         m = types.InlineKeyboardMarkup(row_width=2)
@@ -764,6 +792,7 @@ def admin_markup():
           types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"))
     m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
     return m
+
 def home_text(u, is_admin=False):
     title = setting_get("home_title"); sub = setting_get("home_subtitle"); foot = setting_get("footer_note")
     base = (f"<b>{html.escape(title)}</b>\n<i>{html.escape(sub)}</i>\n\n<blockquote>"
@@ -869,35 +898,6 @@ def admin_text():
             f"🤖 Bot con: <b>{bots_n}/{bots_total}</b>\n🌐 Proxy: <b>{s['available']}</b> / bán <b>{s['sold']}</b>\n"
             f"📱 IPA: <b>{ipa_n}</b>\n💾 Backup: <b>{bk}</b></blockquote>")
 
-def admin_markup():
-    if is_child():
-        m = types.InlineKeyboardMarkup(row_width=2)
-        m.add(types.InlineKeyboardButton("🛍️ Sản phẩm", callback_data="cadm_products"),
-              types.InlineKeyboardButton("📱 Kho IPA", callback_data="cadm_ipa"))
-        m.add(types.InlineKeyboardButton("🌐 Proxy", callback_data="cadm_proxy"),
-              types.InlineKeyboardButton("🔥 Buff SMM", callback_data="adm_smm"))
-        m.add(types.InlineKeyboardButton("🌐 API Data", callback_data="adm_data_api"),
-              types.InlineKeyboardButton("💰 Cấp tiền", callback_data="cadm_grant"))
-        m.add(types.InlineKeyboardButton("📊 Thống kê", callback_data="cadm_stats"),
-              types.InlineKeyboardButton("⚙️ Cài đặt", callback_data="cadm_settings"))
-        m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="cadm_broadcast"),
-              types.InlineKeyboardButton("📤 Xuất DB", callback_data="cadm_export"))
-        m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
-        return m
-    m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("🤖 Bot con", callback_data="adm_bots"),
-          types.InlineKeyboardButton("🔥 Buff SMM", callback_data="adm_smm"))
-    m.add(types.InlineKeyboardButton("🌐 API Data", callback_data="adm_data_api"),
-          types.InlineKeyboardButton("📊 Thống kê", callback_data="adm_stats"))
-    m.add(types.InlineKeyboardButton("💰 Cấp tiền", callback_data="adm_grant"),
-          types.InlineKeyboardButton("🎨 Giao diện", callback_data="adm_ui"))
-    m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="adm_broadcast"),
-          types.InlineKeyboardButton("💾 Backup ngay", callback_data="adm_backup"))
-    m.add(types.InlineKeyboardButton("🎨 Quản lý Menu", callback_data="adm_menu"),
-          types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"))
-    m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
-    return m
-
 def _user_from(tg): return get_or_create_user(tg.id, tg.username or "", tg.first_name or "Khách")
 
 def _handle_shop_buy(bot, call, data, uid, u):
@@ -959,7 +959,6 @@ def _handle_shop_buy(bot, call, data, uid, u):
     except: pass
 
 def register_all_handlers(bot):
-    # ⚠️ FIX: Bind _ctx trực tiếp vào handler — KHÔNG dùng middleware
     _meta = None
     try:
         if bot.token in child_bot_meta: _meta = child_bot_meta[bot.token]
@@ -998,7 +997,7 @@ def register_all_handlers(bot):
         if wc:
             try: bot.send_message(m.chat.id, html.escape(wc))
             except: pass
-        bot.send_message(m.chat.id, home_text(u, m.from_user.id == cur_admin()), reply_markup=main_menu(m.from_user.id))
+        bot.send_message(m.chat.id, home_text(u, m.from_user.id == cur_admin()), reply_markup=main_menu(m.from_user.id, bot=bot))
 
     @bot.message_handler(commands=["cancel"])
     def cmd_cancel(m):
@@ -1037,7 +1036,6 @@ def register_all_handlers(bot):
             if tok in active_child_bots:
                 say("⚠️ Bot con này đang chạy rồi!\n\nDùng Admin Panel → Bot con → Dừng → Bật."); return
             if not is_admin: say("❌ Token đã dùng!"); return
-            log.info("Admin retry token: %s", tok[:20])
             delete_bot_record(tok)
             if tok in active_child_bots: stop_child_bot(tok)
         ok, result = _validate_token(tok)
@@ -1194,11 +1192,7 @@ def register_all_handlers(bot):
         try: reply_ai(bot, m)
         except Exception as e: log.exception("AI: %s", e); bot.reply_to(m, "🤖 Bot bận!")
 
-    register_data_api_handlers(bot)
-    smm.register(bot, {"db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
-        "get_user": get_or_create_user, "show": show, "back_markup": back_markup, "user_states": user_states})
-
-# ═══════════ MENU MANAGER ═══════════
+    # ═══════════ MENU MANAGER ═══════════
     DEFAULT_BTNS = [
         ("profile","👤 Tài khoản"), ("shop","🛒 Cửa Hàng"), ("smm","🔥 Buff MXH"),
         ("ipa","📱 Kho IPA"), ("proxy","🌐 Proxy"), ("deposit","💰 Nạp tiền"),
@@ -1277,6 +1271,9 @@ def register_all_handlers(bot):
         else: _menu_mgr_show(call, "❌ Không tìm thấy")
 
     register_data_api_handlers(bot)
+    smm.register(bot, {"db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
+        "get_user": get_or_create_user, "show": show, "back_markup": back_markup, "user_states": user_states})
+
 def register_data_api_handlers(bot):
     def _menu(call, note=""):
         url = setting_get("data_api_url", "") or "(chưa set)"
@@ -1480,7 +1477,7 @@ def _dispatch(bot, call, data, uid, u, is_admin):
         show(call, f"<b>🎛️ HỖ TRỢ</b>\n\n{html.escape(setting_get('support_text'))}", back_markup())
     elif data == "menu_back":
         user_states.pop(uid, None)
-        show(call, home_text(u, is_admin), main_menu(uid))
+        show(call, home_text(u, is_admin), main_menu(uid, bot=bot))
     elif data == "shop_home": show(call, shop_home_text(), shop_home_markup())
     elif data.startswith("shop_view|"):
         pid = int(data.split("|", 1)[1]); p = shop_get(pid)
@@ -1898,17 +1895,6 @@ def main():
             types.BotCommand("admin", "Admin Panel"),
         ])
     except: pass
-    if ai_client:
-        def _warmup():
-            time.sleep(5)
-            try:
-                r = ai_client.models.generate_content(model=GEMINI_MODEL,
-                    contents=[gtypes.Content(role="user", parts=[gtypes.Part(text="hi")])],
-                    config=gtypes.GenerateContentConfig(max_output_tokens=5))
-                if r and r.text: _ai_model_ok[0] = GEMINI_MODEL
-                log.info("✅ Gemini warm-up OK: %s", GEMINI_MODEL)
-            except Exception as e: log.warning("Gemini warm-up: %s", str(e)[:150])
-        threading.Thread(target=_warmup, daemon=True).start()
     threading.Thread(target=load_child_bots, daemon=True).start()
     threading.Thread(target=run_main_polling, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
