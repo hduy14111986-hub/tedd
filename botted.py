@@ -796,17 +796,33 @@ def regH(bot):
             try:bot.send_message(m.chat.id,html.escape(wc))
             except:pass
         
-        # [CHỨC NĂNG VIDEO MỚI] Bắt đầu gửi video tự động phát
+               # [CHỨC NĂNG VIDEO MỚI] Bắt đầu gửi video tự động phát
         vi=sG("welcome_video","")
         if vi:
+            sent=False
             try:
-                # Gửi dạng animation để tự động phát (auto-play) không cần bấm
+                # Thử gửi dạng animation (cách chuẩn nhất để tự phát)
                 bot.send_animation(m.chat.id, vi, caption=sG("welcome_video_caption",""))
-            except:
+                sent=True
+            except Exception as e:
+                log.warning("Lỗi send_animation (lần 1): %s", e)
+            
+            if not sent:
                 try:
-                    # Nếu lỗi animation (do có tiếng), gửi dạng video thường
+                    # Thử lại bằng cách tải file về và upload lại (fix lỗi metadata từ Snaptik)
+                    fi=bot.get_file(vi)
+                    da=bot.download_file(fi.file_path)
+                    bot.send_animation(m.chat.id, da, caption=sG("welcome_video_caption",""))
+                    sent=True
+                except Exception as e2:
+                    log.warning("Lỗi send_animation (lần 2): %s", e2)
+            
+            if not sent:
+                try:
+                    # Cuối cùng mới gửi dạng video thường (sẽ phải bấm)
                     bot.send_video(m.chat.id, vi, caption=sG("welcome_video_caption",""))
-                except Exception as e:log.warning("video: %s",e)
+                except Exception as e3:
+                    log.warning("Lỗi send_video: %s", e3)
         # [CHỨC NĂNG VIDEO MỚI] Kết thúc
 
         mi=sG("welcome_music","")
