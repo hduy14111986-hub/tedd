@@ -1,4 +1,5 @@
-"""BOT TELEGRAM MULTI-TENANT — Groq AI"""
+"""BOT TE
+LEGRAM MULTI-TENANT — Groq AI"""
 import os,re,time,html,hmac,sqlite3,logging,threading,urllib.parse as up,json
 from collections import deque
 from contextlib import contextmanager
@@ -794,17 +795,14 @@ def regH(bot):
         u=_uF(m.from_user)
         
         # 1. Gửi tin nhắn chào (nếu có)
-        wc=sG("welcome_msg")
-        if wc:
-            try:bot.send_message(m.chat.id,html.escape(wc))
-            except:pass
+       
         
         # 2. Gửi VIDEO/GIF tự động phát (nếu có)
         vi=sG("welcome_video","")
         if vi:
             sent=False
             try:
-                bot.send_animation(m.chat.id, vi, caption=sG("welcome_video_caption",""))
+               bot.send_animation(m.chat.id, vi)
                 sent=True
             except Exception as e:
                 log.warning("Lỗi send_animation lần 1: %s", e)
@@ -818,7 +816,7 @@ def regH(bot):
                     log.warning("Lỗi send_animation lần 2: %s", e2)
             if not sent:
                 try:
-                    bot.send_video(m.chat.id, vi, caption=sG("welcome_video_caption",""))
+                    bot.send_video(m.chat.id, vi)
                 except Exception as e3:
                     log.warning("Lỗi send_video: %s", e3)
 
