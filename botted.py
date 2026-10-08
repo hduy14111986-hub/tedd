@@ -794,15 +794,14 @@ def regH(bot):
         US.pop(m.from_user.id,None)
         u=_uF(m.from_user)
         
-        # 1. Gửi tin nhắn chào (nếu có)
-       
+        # [ĐÃ XÓA welcome_msg - Không gửi tin nhắn chào nữa]
         
-        # 2. Gửi VIDEO/GIF tự động phát (nếu có)
+        # Gửi VIDEO/GIF tự động phát (không có caption)
         vi=sG("welcome_video","")
         if vi:
             sent=False
             try:
-               bot.send_animation(m.chat.id, vi)
+                bot.send_animation(m.chat.id, vi)
                 sent=True
             except Exception as e:
                 log.warning("Lỗi send_animation lần 1: %s", e)
@@ -810,7 +809,7 @@ def regH(bot):
                 try:
                     fi=bot.get_file(vi)
                     da=bot.download_file(fi.file_path)
-                    bot.send_animation(m.chat.id, da, caption=sG("welcome_video_caption",""))
+                    bot.send_animation(m.chat.id, da)
                     sent=True
                 except Exception as e2:
                     log.warning("Lỗi send_animation lần 2: %s", e2)
@@ -820,7 +819,7 @@ def regH(bot):
                 except Exception as e3:
                     log.warning("Lỗi send_video: %s", e3)
 
-        # 3. Gửi Nhạc (nếu có)
+        # Gửi Nhạc (nếu có)
         mi=sG("welcome_music","")
         if mi:
             try:bot.send_voice(m.chat.id,mi)
@@ -828,7 +827,7 @@ def regH(bot):
                 try:bot.send_audio(m.chat.id,mi,caption=sG("welcome_music_caption","🎵 Nhạc chào mừng!"))
                 except Exception as e:log.warning("music: %s",e)
         
-        # 4. Gửi MENU (CHỈ 1 LẦN DUY NHẤT)
+        # Gửi MENU (1 lần duy nhất)
         bot.send_message(m.chat.id,hT(u,m.from_user.id==cAD()),reply_markup=mM(m.from_user.id,bot=bot))
 
     @bot.message_handler(commands=["cancel"])
