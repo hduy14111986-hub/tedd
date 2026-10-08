@@ -744,23 +744,27 @@ def main_menu(uid=None, bot=None):
         ("shop",    types.InlineKeyboardButton("🛒 Cửa Hàng", callback_data="shop_home")),
         ("smm",     types.InlineKeyboardButton("🔥 Buff MXH", callback_data="smm_home")),
         ("ipa",     types.InlineKeyboardButton("📱 Kho IPA", callback_data="ipa_home")),
-        ("proxy",   types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my")),
+        ("proxy",   types.InlineKeyboardButton("🌐 Proxy", callback_data="proxy_my")),
         ("deposit", types.InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_deposit")),
     ]
     if not _is_child:
         all_btns += [
-            ("create_bot", types.InlineKeyboardButton(f"🤖 Thuê Bot ({CREATE_BOT_FEE//1000}k)", callback_data="menu_create_bot")),
+            ("create_bot", types.InlineKeyboardButton("🤖 Thuê Bot", callback_data="menu_create_bot")),
             ("mybots",    types.InlineKeyboardButton("🤖 Bot của tôi", callback_data="mybots")),
             ("donate",    types.InlineKeyboardButton("❤️ Donate", callback_data="menu_donate")),
+            ("support",   types.InlineKeyboardButton("🎛️ Hỗ trợ", callback_data="menu_support")),
         ]
-    all_btns.append(("support", types.InlineKeyboardButton("🎛️ Hỗ trợ", callback_data="menu_support")))
-    for key, btn in all_btns:
-        if key not in hidden: m.add(btn)
+    else:
+        all_btns.append(("support", types.InlineKeyboardButton("🎛️ Hỗ trợ", callback_data="menu_support")))
+    visible = [btn for key, btn in all_btns if key not in hidden]
+    for i in range(0, len(visible), 2):
+        row = visible[i:i+2]
+        m.row(*row)
     for c in customs:
-        try: m.add(types.InlineKeyboardButton(c["label"][:60], url=c["url"]))
+        try: m.row(types.InlineKeyboardButton(c["label"][:60], url=c["url"]))
         except: pass
     if uid == _owner_id:
-        m.add(types.InlineKeyboardButton("👑 ADMIN PANEL", callback_data="cadm_panel" if _is_child else "adm_panel"))
+        m.row(types.InlineKeyboardButton("👑 ADMIN PANEL", callback_data="cadm_panel" if _is_child else "adm_panel"))
     return m
 
 def admin_markup():
@@ -1004,7 +1008,7 @@ def register_all_handlers(bot):
         user_states.pop(m.from_user.id, None)
         bot.send_message(m.chat.id, "✅ Đã hủy. /menu để mở menu.")
 
-    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick")))
+    @bot.callback_query_handler(func=lambda c: not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick")) and (c.data or "") not in ("adm_menu", "cadm_menu"))
     def cb_router(call):
         data = call.data or ""
         if data == "noop":
@@ -1202,14 +1206,14 @@ def register_all_handlers(bot):
 
     def _menu_mgr_show(call, note=""):
         hidden = _get_hidden_btns(); customs = _get_custom_btns()
-        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb = types.InlineKeyboardMarkup(row_width=2)
         for key, label in DEFAULT_BTNS:
             icon = "❌" if key in hidden else "✅"
             kb.add(types.InlineKeyboardButton(f"{icon} {label}", callback_data=f"menumgr_toggle|{key}"))
         for i, c in enumerate(customs):
             kb.add(types.InlineKeyboardButton(f"🗑️ {c['label'][:40]}", callback_data=f"menumgr_del|{i}"))
-        kb.add(types.InlineKeyboardButton("➕ Thêm nút Link", callback_data="menumgr_add"))
-        kb.add(types.InlineKeyboardButton("🔄 Reset tất cả", callback_data="menumgr_reset"))
+        kb.add(types.InlineKeyboardButton("➕ Thêm nút Link", callback_data="menumgr_add"),
+               types.InlineKeyboardButton("🔄 Reset", callback_data="menumgr_reset"))
         kb.add(types.InlineKeyboardButton("🔙 Admin", callback_data="cadm_panel" if is_child() else "adm_panel"))
         txt = ("<b>🎨 QUẢN LÝ MENU</b>\n\n" + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
                + "<blockquote>✅ = Hiện | ❌ = Ẩn\n👇 Bấm để bật/tắt nút\n🗑️ = Nút Link tùy chỉnh</blockquote>")
