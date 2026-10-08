@@ -621,12 +621,13 @@ def aM():
         m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
         return m
     m=types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"),types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"))
-    m.add(types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"),types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"))
-    m.add(types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"),types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"))
-    m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"),types.InlineKeyboardButton("💾 Backup",callback_data="adm_backup"))
-    m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="adm_menu"),types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
-    m.add(types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"),types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
+    m.add(types.InlineKeyboardButton("🤖 Bot con",callback_data="adm_bots"),types.InlineKeyboardButton("🏪 Quản lý Cửa Hàng",callback_data="cadm_shop"))
+    m.add(types.InlineKeyboardButton("🔥 Buff SMM",callback_data="adm_smm"),types.InlineKeyboardButton("🌐 API Data",callback_data="adm_data_api"))
+    m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"),types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"))
+    m.add(types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"),types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"))
+    m.add(types.InlineKeyboardButton("💾 Backup",callback_data="adm_backup"),types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="adm_menu"))
+    m.add(types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"),types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"))
+    m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
     return m
 
 def hT(u,ia=False):
