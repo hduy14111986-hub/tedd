@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """BOT TELEGRAM MULTI-TENANT — Bot chính + Bot con + SMM + API Data + AI"""
-import os, re, time, html, hmac, sqlite3, logging, threading, urllib.parse
+import os, re, time, html, hmac, sqlite3, logging, threading, urllib.parse, json
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -227,6 +227,14 @@ def setting_set(k, v):
     with db() as c: c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (k, v))
 def setting_all():
     with db() as c: return dict(c.execute("SELECT key,value FROM settings").fetchall())
+
+def _get_hidden_btns():
+    try: return set(json.loads(setting_get("menu_hidden", "[]")))
+    except: return set()
+
+def _get_custom_btns():
+    try: return json.loads(setting_get("menu_custom", "[]"))
+    except: return []
 def fmt(n): return f"{int(n):,}".replace(",", ".")
 def bank_info():
     if is_child(): return (setting_get("bank_name") or "—", setting_get("account_no") or "—", setting_get("account_name") or "—")
@@ -727,24 +735,35 @@ def reply_ai(bot, m):
 def back_markup(cb="menu_back"):
     return types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data=cb))
 
-def main_menu(uid=None):
+def admin_markup():
+    if is_child():
+        m = types.InlineKeyboardMarkup(row_width=2)
+        m.add(types.InlineKeyboardButton("🛍️ Sản phẩm", callback_data="cadm_products"),
+              types.InlineKeyboardButton("📱 Kho IPA", callback_data="cadm_ipa"))
+        m.add(types.InlineKeyboardButton("🌐 Proxy", callback_data="cadm_proxy"),
+              types.InlineKeyboardButton("🔥 Buff SMM", callback_data="adm_smm"))
+        m.add(types.InlineKeyboardButton("🌐 API Data", callback_data="adm_data_api"),
+              types.InlineKeyboardButton("💰 Cấp tiền", callback_data="cadm_grant"))
+        m.add(types.InlineKeyboardButton("📊 Thống kê", callback_data="cadm_stats"),
+              types.InlineKeyboardButton("⚙️ Cài đặt", callback_data="cadm_settings"))
+        m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="cadm_broadcast"),
+              types.InlineKeyboardButton("📤 Xuất DB", callback_data="cadm_export"))
+        m.add(types.InlineKeyboardButton("🎨 Quản lý Menu", callback_data="cadm_menu"),
+              types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
+        return m
     m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("👤 Tài khoản", callback_data="menu_profile"),
-          types.InlineKeyboardButton("🛒 Cửa Hàng", callback_data="shop_home"))
-    m.add(types.InlineKeyboardButton("🔥 Buff MXH", callback_data="smm_home"),
-          types.InlineKeyboardButton("📱 Kho IPA", callback_data="ipa_home"))
-    m.add(types.InlineKeyboardButton("🌐 Proxy của tôi", callback_data="proxy_my"),
-          types.InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_deposit"))
-    if not is_child():
-        m.add(types.InlineKeyboardButton(f"🤖 Thuê Bot ({CREATE_BOT_FEE//1000}k)", callback_data="menu_create_bot"),
-              types.InlineKeyboardButton("🤖 Bot của tôi", callback_data="mybots"))
-        m.add(types.InlineKeyboardButton("❤️ Donate", callback_data="menu_donate"),
-              types.InlineKeyboardButton("🎛️ Hỗ trợ", callback_data="menu_support"))
-    else: m.add(types.InlineKeyboardButton("🎛️ Hỗ trợ", callback_data="menu_support"))
-    if uid == cur_admin():
-        m.add(types.InlineKeyboardButton("👑 ADMIN PANEL", callback_data="cadm_panel" if is_child() else "adm_panel"))
+    m.add(types.InlineKeyboardButton("🤖 Bot con", callback_data="adm_bots"),
+          types.InlineKeyboardButton("🔥 Buff SMM", callback_data="adm_smm"))
+    m.add(types.InlineKeyboardButton("🌐 API Data", callback_data="adm_data_api"),
+          types.InlineKeyboardButton("📊 Thống kê", callback_data="adm_stats"))
+    m.add(types.InlineKeyboardButton("💰 Cấp tiền", callback_data="adm_grant"),
+          types.InlineKeyboardButton("🎨 Giao diện", callback_data="adm_ui"))
+    m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="adm_broadcast"),
+          types.InlineKeyboardButton("💾 Backup ngay", callback_data="adm_backup"))
+    m.add(types.InlineKeyboardButton("🎨 Quản lý Menu", callback_data="adm_menu"),
+          types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"))
+    m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
     return m
-
 def home_text(u, is_admin=False):
     title = setting_get("home_title"); sub = setting_get("home_subtitle"); foot = setting_get("footer_note")
     base = (f"<b>{html.escape(title)}</b>\n<i>{html.escape(sub)}</i>\n\n<blockquote>"
@@ -874,8 +893,9 @@ def admin_markup():
           types.InlineKeyboardButton("🎨 Giao diện", callback_data="adm_ui"))
     m.add(types.InlineKeyboardButton("📣 Thông báo", callback_data="adm_broadcast"),
           types.InlineKeyboardButton("💾 Backup ngay", callback_data="adm_backup"))
-    m.add(types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"),
-          types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
+    m.add(types.InlineKeyboardButton("🎨 Quản lý Menu", callback_data="adm_menu"),
+          types.InlineKeyboardButton("📥 Restore DB", callback_data="adm_restore"))
+    m.add(types.InlineKeyboardButton("🔙 Menu chính", callback_data="menu_back"))
     return m
 
 def _user_from(tg): return get_or_create_user(tg.id, tg.username or "", tg.first_name or "Khách")
@@ -1178,6 +1198,85 @@ def register_all_handlers(bot):
     smm.register(bot, {"db_path_fn": cur_db, "fmt": fmt, "cur_admin": cur_admin,
         "get_user": get_or_create_user, "show": show, "back_markup": back_markup, "user_states": user_states})
 
+# ═══════════ MENU MANAGER ═══════════
+    DEFAULT_BTNS = [
+        ("profile","👤 Tài khoản"), ("shop","🛒 Cửa Hàng"), ("smm","🔥 Buff MXH"),
+        ("ipa","📱 Kho IPA"), ("proxy","🌐 Proxy"), ("deposit","💰 Nạp tiền"),
+        ("create_bot","🤖 Thuê Bot"), ("mybots","🤖 Bot của tôi"),
+        ("donate","❤️ Donate"), ("support","🎛️ Hỗ trợ"),
+    ]
+
+    def _menu_mgr_show(call, note=""):
+        hidden = _get_hidden_btns(); customs = _get_custom_btns()
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for key, label in DEFAULT_BTNS:
+            icon = "❌" if key in hidden else "✅"
+            kb.add(types.InlineKeyboardButton(f"{icon} {label}", callback_data=f"menumgr_toggle|{key}"))
+        for i, c in enumerate(customs):
+            kb.add(types.InlineKeyboardButton(f"🗑️ {c['label'][:40]}", callback_data=f"menumgr_del|{i}"))
+        kb.add(types.InlineKeyboardButton("➕ Thêm nút Link", callback_data="menumgr_add"))
+        kb.add(types.InlineKeyboardButton("🔄 Reset tất cả", callback_data="menumgr_reset"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin", callback_data="cadm_panel" if is_child() else "adm_panel"))
+        txt = ("<b>🎨 QUẢN LÝ MENU</b>\n\n" + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
+               + "<blockquote>✅ = Hiện | ❌ = Ẩn\n👇 Bấm để bật/tắt nút\n🗑️ = Nút Link tùy chỉnh</blockquote>")
+        show(call, txt, kb)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") in ("adm_menu", "cadm_menu"))
+    def _menu_mgr(call):
+        if call.from_user.id != cur_admin(): return
+        _menu_mgr_show(call)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("menumgr_toggle|"))
+    def _menu_toggle(call):
+        if call.from_user.id != cur_admin(): return
+        key = call.data.split("|", 1)[1]
+        hidden = _get_hidden_btns()
+        if key in hidden: hidden.discard(key)
+        else: hidden.add(key)
+        setting_set("menu_hidden", json.dumps(list(hidden)))
+        _menu_mgr_show(call, "✅ Đã cập nhật")
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "menumgr_reset")
+    def _menu_reset(call):
+        if call.from_user.id != cur_admin(): return
+        setting_set("menu_hidden", "[]"); setting_set("menu_custom", "[]")
+        _menu_mgr_show(call, "✅ Đã reset")
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "menumgr_add")
+    def _menu_add(call):
+        if call.from_user.id != cur_admin(): return
+        user_states[call.from_user.id] = "MENUMGR_ADD"
+        show(call, "<b>➕ THÊM NÚT LINK</b>\n\nGửi: <code>Tên nút | https://link</code>\n\n"
+                   "VD: <code>📞 Liên hệ admin | https://t.me/admin</code>\n\n/cancel hủy.",
+             back_markup("cadm_menu" if is_child() else "adm_menu"))
+
+    @bot.message_handler(func=lambda m: m.from_user and m.from_user.id == cur_admin()
+        and user_states.get(m.from_user.id) == "MENUMGR_ADD" and m.text and not m.text.startswith("/"))
+    def _menu_add_in(m):
+        raw = m.text.strip()
+        if "|" not in raw: bot.reply_to(m, "❌ Format: Tên | URL"); return
+        label, url = [x.strip() for x in raw.split("|", 1)]
+        if not url.startswith("http"): bot.reply_to(m, "❌ URL phải bắt đầu bằng http"); return
+        customs = _get_custom_btns()
+        customs.append({"label": label[:60], "url": url})
+        setting_set("menu_custom", json.dumps(customs))
+        user_states.pop(m.from_user.id, None)
+        bot.reply_to(m, f"✅ Đã thêm <b>{html.escape(label)}</b>",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🔙 Quản lý Menu", callback_data="cadm_menu" if is_child() else "adm_menu")))
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("menumgr_del|"))
+    def _menu_del(call):
+        if call.from_user.id != cur_admin(): return
+        i = int(call.data.split("|", 1)[1])
+        customs = _get_custom_btns()
+        if 0 <= i < len(customs):
+            removed = customs.pop(i)
+            setting_set("menu_custom", json.dumps(customs))
+            _menu_mgr_show(call, f"🗑️ Đã xóa: {removed['label']}")
+        else: _menu_mgr_show(call, "❌ Không tìm thấy")
+
+    register_data_api_handlers(bot)
 def register_data_api_handlers(bot):
     def _menu(call, note=""):
         url = setting_get("data_api_url", "") or "(chưa set)"
