@@ -471,7 +471,7 @@ def _pTx():
     nw=dt.utcnow()+td(hours=7)
     t=PERS+f"\nGiờ: {nw:%H:%M %d/%m/%Y}\n"
     try:
-        ps=sL(limit=30)
+        ps=sL(lim=30)
         if ps:
             t+="\n📦 SP:\n"
             for p in ps:t+=f"- {p['name']} | {fmt(p['price'])}đ | {p['category']}\n"
