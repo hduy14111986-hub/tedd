@@ -804,7 +804,7 @@ def ask_gemini(text, key=None):
                             kw["tools"] = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
                         r = ai_client.models.generate_content(
                             model=model, contents=contents,
-                            config=gtypes.GenerateContentConfig(**kw), timeout=60)
+                            config=gtypes.GenerateContentConfig(**kw))
                         ans = (r.text or "").strip()
                         if not ans:
                             last_err = "empty response"; continue
