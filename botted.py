@@ -788,42 +788,46 @@ def regH(bot):
         return f
     bot.message_handler=_wr(_om);bot.callback_query_handler=_wr(_oc)
 
-    @bot.message_handler(commands=["start","menu"])
+       @bot.message_handler(commands=["start","menu"])
     def cs(m):
         US.pop(m.from_user.id,None);u=_uF(m.from_user)
+        
+        # 1. Gửi tin nhắn chào (nếu có)
         wc=sG("welcome_msg")
         if wc:
             try:bot.send_message(m.chat.id,html.escape(wc))
             except:pass
         
-               # [CHỨC NĂNG VIDEO MỚI] Bắt đầu gửi video tự động phát
+        # 2. Gửi VIDEO/GIF tự động phát TRƯỚC
         vi=sG("welcome_video","")
         if vi:
             sent=False
             try:
-                # Thử gửi dạng animation (cách chuẩn nhất để tự phát)
                 bot.send_animation(m.chat.id, vi, caption=sG("welcome_video_caption",""))
                 sent=True
             except Exception as e:
-                log.warning("Lỗi send_animation (lần 1): %s", e)
-            
+                log.warning("Lỗi send_animation lần 1: %s", e)
             if not sent:
                 try:
-                    # Thử lại bằng cách tải file về và upload lại (fix lỗi metadata từ Snaptik)
                     fi=bot.get_file(vi)
                     da=bot.download_file(fi.file_path)
                     bot.send_animation(m.chat.id, da, caption=sG("welcome_video_caption",""))
                     sent=True
-                except Exception as e2:
-                    log.warning("Lỗi send_animation (lần 2): %s", e2)
-            
+                except Exception as e2:log.warning("Lỗi send_animation lần 2: %s", e2)
             if not sent:
-                try:
-                    # Cuối cùng mới gửi dạng video thường (sẽ phải bấm)
-                    bot.send_video(m.chat.id, vi, caption=sG("welcome_video_caption",""))
-                except Exception as e3:
-                    log.warning("Lỗi send_video: %s", e3)
-        # [CHỨC NĂNG VIDEO MỚI] Kết thúc
+                try:bot.send_video(m.chat.id, vi, caption=sG("welcome_video_caption",""))
+                except Exception as e3:log.warning("Lỗi send_video: %s", e3)
+
+        # 3. Gửi Nhạc (nếu có)
+        mi=sG("welcome_music","")
+        if mi:
+            try:bot.send_voice(m.chat.id,mi)
+            except:
+                try:bot.send_audio(m.chat.id,mi,caption=sG("welcome_music_caption","🎵 Nhạc chào mừng!"))
+                except Exception as e:log.warning("music: %s",e)
+        
+        # 4. Gửi MENU (HỆ THỐNG BOT ĐA NĂNG) XUỐNG DƯỚI CÙNG
+        bot.send_message(m.chat.id,hT(u,m.from_user.id==cAD()),reply_markup=mM(m.from_user.id,bot=bot))
 
         mi=sG("welcome_music","")
         if mi:
