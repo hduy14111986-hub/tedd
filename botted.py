@@ -804,6 +804,7 @@ def hSB(b, call, da, uid, u):
         with db() as c:c.execute("UPDATE orders SET status='delivered' WHERE id=?",(res['order_id'],))
         return
 
+    # Mua hàng thủ công (Chưa gắn API) - Admin tự xử lý
     ok,res=sBuy(uid,pid)
     if not ok:
         sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
@@ -811,14 +812,23 @@ def hSB(b, call, da, uid, u):
         
     msg=(f"<b>🎉 ĐẶT HÀNG THÀNH CÔNG!</b>\n\n"
          f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
-         f"⚠️ Vui lòng chờ admin xử lý đơn hàng.")
+         f"⏳ Đơn hàng của bạn đang được admin xử lý. Vui lòng chờ trong giây lát, data sẽ được gửi ngay!")
          
     sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
         types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
         types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
     ))
     
-    try:b.send_message(cAD(),f"🔔 ĐƠN HÀNG MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
+    # Gửi thông báo chi tiết cho Admin
+    admin_msg = (f"🔔 <b>ĐƠN HÀNG MỚI CẦN XỬ LÝ</b>\n\n"
+                 f"🆔 Đơn hàng: <b>#{res['order_id']}</b>\n"
+                 f"👤 Khách hàng: <code>{uid}</code> ({html.escape(call.from_user.first_name)})\n"
+                 f"📦 Sản phẩm: <b>{html.escape(res['name'])}</b>\n"
+                 f"💵 Giá: <b>{fmt(res['price'])}đ</b>\n"
+                 f"📝 Trạng thái: Đã trừ tiền, chờ gửi data.\n\n"
+                 f"👉 Hãy gửi data cho khách, sau đó vào <b>🧾 Đơn hàng</b> -> Đánh dấu đã giao.")
+    try:
+        b.send_message(cAD(), admin_msg, reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("💬 Nhắn khách", url=f"tg://user?id={uid}")))
     except:pass
 
 def regH(bot):
@@ -889,7 +899,7 @@ def regH(bot):
             return
         uid=call.from_user.id;u=_uF(call.from_user);ia=uid==cAD()
         try:
-            bot.answer_callback_query(call.id, "Đã nhận nút bấm!", show_alert=True) # TẠM THỜI HIỆN POPUP ĐỂ TEST
+            bot.answer_callback_query(call.id) # Đã xóa popup debug "Đã nhận nút bấm!"
         except Exception as e:
             log.error("Lỗi answer_callback_query: %s", e)
 
