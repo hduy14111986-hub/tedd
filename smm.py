@@ -291,14 +291,21 @@ def register(bot, h):
     fmt = h["fmt"]; cur_admin = h["cur_admin"]; get_user = h["get_user"]
     show = h["show"]; back_markup = h["back_markup"]; user_states = h["user_states"]
     dbp = h["db_path_fn"]
+    admin_cb = h.get("admin_cb") or (lambda: "adm_panel")
 
     def _safe(fn):
         def w(call):
-            try: fn(call)
+            try:
+                try: bot.answer_callback_query(call.id)
+                except: pass
+                fn(call)
             except Exception as e:
                 log.exception("smm err: %s", e)
-                try: bot.answer_callback_query(call.id, f"❌ {str(e)[:100]}", show_alert=True)
+                try:
+                    bot.send_message(call.message.chat.id,
+                        f"❌ Lỗi: <code>{html.escape(str(e)[:200])}</code>")
                 except: pass
+        w.__name__ = getattr(fn, "__name__", "w")
         return w
 
     # ═══════════ USER ═══════════
@@ -436,7 +443,7 @@ def register(bot, h):
         except: return
         uid = call.from_user.id; raw = user_states.get(uid, "")
         if not raw.startswith(f"SMM_OK|{sid}|"):
-            bot.answer_callback_query(call.id, "Phiên hết hạn"); return
+            bot.send_message(call.message.chat.id, "⚠️ Phiên đã hết hạn, vui lòng đặt lại."); return
         try: _, _, link, _ = raw.split("|", 3)
         except: user_states.pop(uid, None); return
         bp = dbp(); s = svc_get(bp, sid)
@@ -447,7 +454,7 @@ def register(bot, h):
             if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
                          (price, uid, price)).rowcount == 0:
                 c.rollback(); user_states.pop(uid, None)
-                bot.answer_callback_query(call.id, "Số dư không đủ"); return
+                bot.send_message(call.message.chat.id, "❌ Số dư không đủ"); return
             c.commit()
         finally: c.close()
         resp = api_add(bp, s["api_service"], link, qty)
@@ -463,7 +470,21 @@ def register(bot, h):
                     types.InlineKeyboardButton("🔙 Thử lại", callback_data=f"smm_view|{sid}")))
             return
         api_o = str(resp.get("order") or resp.get("order_id") or "—") if isinstance(resp, dict) else "—"
-        oid = order_create(bp, uid, s, link, qty, price, api_o, "processing")
+        try:
+            oid = order_create(bp, uid, s, link, qty, price, api_o, "processing")
+        except Exception as e:
+            # Đã trừ tiền + NCC đã nhận đơn nhưng ghi DB lỗi → báo admin để xử lý tay
+            log.exception("order_create fail: %s", e)
+            user_states.pop(uid, None)
+            try:
+                bot.send_message(cur_admin(),
+                    f"🚨 <b>LỖI GHI ĐƠN SMM</b>\nUser <code>{uid}</code> đã bị trừ {fmt(price)}đ\n"
+                    f"🎯 {html.escape(s['name'])}\n📊 {fmt(qty)}\n🔗 <code>{html.escape(link[:80])}</code>\n"
+                    f"🆔 Mã đơn NCC: <code>{html.escape(api_o)}</code>\n⚠️ Cần kiểm tra thủ công.")
+            except: pass
+            bot.send_message(call.message.chat.id,
+                "⚠️ Đơn đã gửi đi nhưng hệ thống ghi nhận lỗi. Admin đã được báo, vui lòng liên hệ hỗ trợ.")
+            return
         user_states.pop(uid, None)
         u = get_user(uid, call.from_user.username or "", call.from_user.first_name or "")
         bot.edit_message_text(f"<b>🎉 ĐẶT HÀNG OK!</b>\n\n<blockquote>🧾 #{oid}\n"
@@ -534,10 +555,11 @@ def register(bot, h):
               types.InlineKeyboardButton("⚙️ Cấu hình API", callback_data="adm_smm_cfg"),
               types.InlineKeyboardButton("🧾 Đơn hàng", callback_data="adm_smm_orders"),
               types.InlineKeyboardButton("💵 Số dư API", callback_data="adm_smm_bal"),
+              types.InlineKeyboardButton("🔍 Debug API", callback_data="adm_smm_debug"),
               types.InlineKeyboardButton("➕ Thêm 1 DV thủ công", callback_data="adm_smm_add"),
               types.InlineKeyboardButton("🧹 Xóa TẤT CẢ DV", callback_data="adm_smm_wipe"),
               types.InlineKeyboardButton("🗑️ Xóa cache API", callback_data="adm_smm_cachewipe"),
-              types.InlineKeyboardButton("🔙 Admin", callback_data="adm_panel"))
+              types.InlineKeyboardButton("🔙 Admin", callback_data=admin_cb()))
         show(call, txt, m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm")
@@ -554,8 +576,6 @@ def register(bot, h):
         bp = dbp()
         if not cfg_get(bp, "smm_api_url") or not cfg_get(bp, "smm_api_key"):
             show(call, "⚠️ Chưa cấu hình API.", back_markup("adm_smm_cfg")); return
-        try: bot.answer_callback_query(call.id, "🔄 Đang tải...")
-        except: pass
         resp = api_services(bp)
         if isinstance(resp, dict) and "error" in resp:
             show(call, f"❌ <b>API BÁO LỖI</b>\n\n<code>{html.escape(str(resp['error'])[:300])}</code>",
@@ -676,17 +696,11 @@ def register(bot, h):
             sid = str(s.get("service") or s.get("id") or "").strip()
             if sid == api_id: found = s; break
         if not found:
-            try: bot.answer_callback_query(call.id, "❌ Không tìm thấy", show_alert=True)
-            except: pass; return
-        if svc_exists(bp, api_id):
-            try: bot.answer_callback_query(call.id, "✅ Đã có trong DB")
-            except: pass
-        else:
+            bot.send_message(call.message.chat.id, "❌ Không tìm thấy DV trong cache."); return
+        if not svc_exists(bp, api_id):
             rate = _get_rate(bp); markup = _get_markup(bp)
             nm, cat, cost, price, mn, mx, _ = _parse_service(found, rate, markup)
             svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
-            try: bot.answer_callback_query(call.id, f"✅ Đã thêm: {nm[:30]}")
-            except: pass
         call.data = f"adm_pick_sub|{pl}|{sub}|{page}"
         _pick_sub(call)
 
@@ -725,8 +739,6 @@ def register(bot, h):
         bp = dbp()
         n = svc_count(bp)
         if n <= 0:
-            try: bot.answer_callback_query(call.id, "DB đã rỗng")
-            except: pass
             _adm_menu(call, "ℹ️ DB không có DV nào.")
             return
         kb = types.InlineKeyboardMarkup(row_width=2)
@@ -743,12 +755,7 @@ def register(bot, h):
         if call.from_user.id != cur_admin(): return
         bp = dbp()
         n = svc_count(bp)
-        try: _q(bp, "DELETE FROM smm_services")
-        except Exception as e:
-            log.warning("wipe err: %s", e)
-            try: bot.answer_callback_query(call.id, f"❌ Lỗi: {e}", show_alert=True)
-            except: pass
-            return
+        _q(bp, "DELETE FROM smm_services")
         log.info("Wiped %d services", n)
         _adm_menu(call, f"✅ Đã xoá <b>{n}</b> dịch vụ khỏi DB.")
 
@@ -764,6 +771,7 @@ def register(bot, h):
 
     # ═══════════ CONFIG ═══════════
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_cfg")
+    @_safe
     def _cfg(call):
         if call.from_user.id != cur_admin(): return
         m = types.InlineKeyboardMarkup(row_width=1)
@@ -773,6 +781,7 @@ def register(bot, h):
         show(call, "<b>⚙️ CẤU HÌNH API</b>\n\nNhập URL dạng: <code>https://ncc.com/api/v2</code>", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_price")
+    @_safe
     def _price_menu(call):
         if call.from_user.id != cur_admin(): return
         bp = dbp()
@@ -788,9 +797,11 @@ def register(bot, h):
                    "→ 29.250đ/1k", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_set|"))
+    @_safe
     def _setc(call):
         if call.from_user.id != cur_admin(): return
         k = call.data.split("|", 1)[1]
+        if k not in ("smm_api_url", "smm_api_key", "smm_usd_rate", "smm_markup_pct"): return
         user_states[call.from_user.id] = f"SMM_CFG|{k}"
         hint = "VD: 25000" if k == "smm_usd_rate" else ("VD: 30" if k == "smm_markup_pct" else "Nhập giá trị")
         show(call, f"Nhập giá trị mới cho <code>{k}</code>.\n<i>{hint}</i>\n/cancel hủy.",
@@ -810,17 +821,17 @@ def register(bot, h):
                 types.InlineKeyboardButton("🔙 Quay lại", callback_data=back)))
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_bal")
+    @_safe
     def _bal(call):
         if call.from_user.id != cur_admin(): return
         show(call, f"<b>💰 SỐ DƯ API</b>\n\n<blockquote>{html.escape(str(api_balance(dbp()))[:300])}</blockquote>",
              back_markup("adm_smm"))
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_debug")
+    @_safe
     def _debug(call):
         if call.from_user.id != cur_admin(): return
         bp = dbp()
-        try: bot.answer_callback_query(call.id, "🔍 Đang test...")
-        except: pass
         code, body, parsed = api_debug(bp)
         url = cfg_get(bp, "smm_api_url", "(trống)")
         key = cfg_get(bp, "smm_api_key", "")
@@ -870,9 +881,7 @@ def register(bot, h):
         if call.from_user.id != cur_admin(): return
         _show_svc(call, int(call.data.split("|")[1]))
 
-    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_sv|"))
-    def _sv(call):
-        if call.from_user.id != cur_admin(): return
+    def _sv_impl(call):
         sid = int(call.data.split("|")[1]); s = svc_get(dbp(), sid)
         if not s: show(call, "Không thấy.", back_markup("adm_smm_list")); return
         profit = s["price"] - s["cost"]
@@ -896,10 +905,18 @@ def register(bot, h):
               types.InlineKeyboardButton("🔙", callback_data="adm_smm_list"))
         show(call, txt, m)
 
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_sv|"))
+    @_safe
+    def _sv(call):
+        if call.from_user.id != cur_admin(): return
+        _sv_impl(call)
+
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_ed|"))
+    @_safe
     def _ed(call):
         if call.from_user.id != cur_admin(): return
         _, sid, f = call.data.split("|")
+        if f not in ("name", "price", "min", "max"): return
         user_states[call.from_user.id] = f"SMM_ED|{sid}|{f}"
         show(call, f"Nhập <code>{f}</code> mới cho #{sid}. /cancel hủy.", back_markup(f"adm_smm_sv|{sid}"))
 
@@ -920,12 +937,14 @@ def register(bot, h):
             types.InlineKeyboardButton("🔙 DS", callback_data="adm_smm_list")))
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_tg|"))
+    @_safe
     def _tg(call):
         if call.from_user.id != cur_admin(): return
         sid = int(call.data.split("|")[1]); svc_toggle(dbp(), sid)
-        call.data = f"adm_smm_sv|{sid}"; _sv(call)
+        call.data = f"adm_smm_sv|{sid}"; _sv_impl(call)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_dl|"))
+    @_safe
     def _dl(call):
         if call.from_user.id != cur_admin(): return
         sid = int(call.data.split("|")[1])
@@ -935,11 +954,13 @@ def register(bot, h):
         show(call, f"⚠️ Xoá DV #{sid}?", kb)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_dlok|"))
+    @_safe
     def _dlok(call):
         if call.from_user.id != cur_admin(): return
         svc_del(dbp(), int(call.data.split("|")[1])); _show_svc(call, 0)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_add")
+    @_safe
     def _add(call):
         if call.from_user.id != cur_admin(): return
         user_states[call.from_user.id] = "SMM_ADD"
@@ -964,6 +985,7 @@ def register(bot, h):
 
     # ═══════════ ORDERS ═══════════
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_orders")
+    @_safe
     def _ords(call):
         if call.from_user.id != cur_admin(): return
         bp = dbp(); rows = order_list_all(bp, 30)
@@ -976,9 +998,7 @@ def register(bot, h):
               types.InlineKeyboardButton("🔙", callback_data="adm_smm"))
         show(call, f"<b>🧾 ĐƠN BUFF ({len(rows)})</b>", m)
 
-    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_ov|"))
-    def _ov_admin(call):
-        if call.from_user.id != cur_admin(): return
+    def _ov_admin_impl(call):
         oid = int(call.data.split("|")[1]); bp = dbp(); r = order_get(bp, oid)
         if not r: show(call, "Không thấy.", back_markup("adm_smm_orders")); return
         if r["api_order"] and r["status"] not in ("completed","refunded","canceled"):
@@ -996,17 +1016,25 @@ def register(bot, h):
         m.add(types.InlineKeyboardButton("🔙", callback_data="adm_smm_orders"))
         show(call, txt, m)
 
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_ov|"))
+    @_safe
+    def _ov_admin(call):
+        if call.from_user.id != cur_admin(): return
+        _ov_admin_impl(call)
+
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_smm_rf|"))
+    @_safe
     def _rf(call):
         if call.from_user.id != cur_admin(): return
         oid = int(call.data.split("|")[1]); bp = dbp(); r = order_get(bp, oid)
         if not r: return
-        order_refund(bp, oid)
-        try: bot.send_message(r["user_id"], f"💸 Đã hoàn <b>{fmt(r['price'])}đ</b> cho đơn #{oid}.")
-        except: pass
-        call.data = f"adm_smm_ov|{oid}"; _ov_admin(call)
+        if order_refund(bp, oid):
+            try: bot.send_message(r["user_id"], f"💸 Đã hoàn <b>{fmt(r['price'])}đ</b> cho đơn #{oid}.")
+            except: pass
+        call.data = f"adm_smm_ov|{oid}"; _ov_admin_impl(call)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_ref")
+    @_safe
     def _ref(call):
         if call.from_user.id != cur_admin(): return
         bp = dbp(); rows = order_list_all(bp, 50); n = 0
