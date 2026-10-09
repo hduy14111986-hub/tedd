@@ -716,22 +716,115 @@ def aT():
 def _uF(tg):return gU(tg.id,tg.username or "",tg.first_name or "Khách")
 
 def hSB(b, call, da, uid, u):
-    def hSB(b, call, da, uid, u):
-    # THÊM 2 DÒNG NÀY ĐỂ DEBUG
-    try: b.answer_callback_query(call.id, "Đã nhận nút Mua!", show_alert=True)
-    except: pass
+    try:
+        pid = int(da.split("|", 1)[1])
+    except:
+        sh(call, "❌ Lỗi dữ liệu sản phẩm.", bM("shop_home"))
+        return
+
+    p = sGt(pid)
+    if not p:
+        sh(call, "❌ Không tìm thấy sản phẩm.", bM("shop_home"))
+        return
     
-    try:
-        pid = int(da.split("|", 1)[1])
-    except:
-        sh(call, "❌ Lỗi dữ liệu sản phẩm.", bM("shop_home"))
+    # Lấy thông tin user mới nhất
+    u = _uF(call.from_user)
+    
+    # Kiểm tra số dư
+    if u["balance"] < p["price"]:
+        kb = types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("💳 Nạp tiền", callback_data="menu_deposit"),
+            types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home")
+        )
+        sh(call, f"⚠️ <b>SỐ DƯ KHÔNG ĐỦ</b>\n\n"
+                 f"💵 Giá: <b>{fmt(p['price'])}đ</b>\n"
+                 f"🏦 Số dư: <b>{fmt(u['balance'])}đ</b>\n"
+                 f"❌ Thiếu: <b>{fmt(p['price'] - u['balance'])}đ</b>\n\n"
+                 f"Vui lòng nạp thêm tiền để mua hàng!", kb)
         return
-    # ... phần còn lại giữ nguyên
-    try:
-        pid = int(da.split("|", 1)[1])
-    except:
-        sh(call, "❌ Lỗi dữ liệu sản phẩm.", bM("shop_home"))
+
+    cat = p["category"]
+    
+    if cat == "Account":
+        ok, er, inf = aBuy(uid, pid)
+        if not ok:
+            sh(call, f"❌ <b>LỖI:</b> {er}", bM("shop_home"))
+            return
+        try:b.delete_message(call.message.chat.id,call.message.message_id)
+        except:pass
+        tx=(f"<b>🎉 MUA TK OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-inf['price'])}đ</b>\n\n<b>📦 {html.escape(inf['name'])}</b>\n\n<blockquote>"
+            f"👤 <code>{html.escape(inf['username'])}</code>\n🔑 <code>{html.escape(inf['password'])}</code>\n")
+        if inf['note']:tx+=f"📝 {html.escape(inf['note'])}\n"
+        tx+="</blockquote>\n\n⚠️ Đổi mật khẩu ngay!"
+        b.send_message(call.message.chat.id,tx,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🛒 Shop",callback_data="shop_home")))
+        try:b.send_message(cAD(),f"💰 Bán TK: <code>{uid}</code> - {fmt(inf['price'])}đ")
+        except:pass
         return
+        
+    if cat == "Proxy":
+        ok, er, inf = pBuy(uid, pid)
+        if not ok:
+            sh(call, f"❌ <b>LỖI:</b> {er}", bM("shop_home"))
+            return
+        try:b.delete_message(call.message.chat.id,call.message.message_id)
+        except:pass
+        ln=(f"{inf['protocol'].lower()}://{inf['username']}:{inf['password']}@{inf['ip']}:{inf['port']}" if inf['username'] else f"{inf['protocol'].lower()}://{inf['ip']}:{inf['port']}")
+        tx=(f"<b>🎉 MUA PROXY OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-inf['price'])}đ</b>\n\n<b>📦 {html.escape(inf['name'])}</b>\n\n<blockquote>"
+            f"⏱ {inf['days']}d | 📅 {inf['expires_at']}\n🌐 <code>{inf['ip']}:{inf['port']}</code>\n")
+        if inf['username']:tx+=f"👤 <code>{inf['username']}</code>\n"
+        if inf['password']:tx+=f"🔑 <code>{inf['password']}</code>\n"
+        tx+=f"</blockquote>\n\n<code>{html.escape(ln)}</code>"
+        b.send_message(call.message.chat.id,tx,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🌐 Proxy của tôi",callback_data="proxy_my")))
+        try:b.send_message(cAD(),f"💰 Proxy: <code>{uid}</code> - {fmt(inf['price'])}đ")
+        except:pass
+        return
+
+    au=sG("data_api_url");ak=sG("data_api_key");ac=(p.get("api_product_code") or "").strip()
+    
+    if cat=="Data" and au and ak and ac:
+        ok,res=sBuy(uid,pid)
+        if not ok:
+            sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
+            return
+            
+        me=sG("data_api_method","POST")
+        sc,ds,er=cNCC(au,ak,ac,1,f"BOT{res['order_id']}",me)
+        
+        if not sc:
+            aAM(uid,res['price'])
+            with db() as c:c.execute("UPDATE orders SET status='refunded' WHERE id=?",(res['order_id'],))
+            sh(call,f"❌ <b>LỖI NHÀ CUNG CẤP:</b>\n<code>{html.escape(str(er)[:250])}</code>\n\n"
+                     f"💸 Đã hoàn lại <b>{fmt(res['price'])}đ</b> vào số dư của bạn.", bM("shop_home"))
+            return
+            
+        msg=(f"<b>🎉 MUA DATA THÀNH CÔNG!</b>\n\n"
+             f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
+             f"<b>📄 Thông tin Data:</b>\n<code>{html.escape(str(ds)[:3000])}</code>")
+             
+        sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
+            types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
+        ))
+        
+        with db() as c:c.execute("UPDATE orders SET status='delivered' WHERE id=?",(res['order_id'],))
+        return
+
+    ok,res=sBuy(uid,pid)
+    if not ok:
+        sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
+        return
+        
+    msg=(f"<b>🎉 ĐẶT HÀNG THÀNH CÔNG!</b>\n\n"
+         f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
+         f"⚠️ Vui lòng chờ admin xử lý đơn hàng.")
+         
+    sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
+        types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
+        types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
+    ))
+    
+    try:b.send_message(cAD(),f"🔔 ĐƠN HÀNG MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
+    except:pass
         
     p = sGt(pid)
     if not p:
