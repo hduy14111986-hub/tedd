@@ -75,7 +75,7 @@ SCH="""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY,username TE
 CREATE TABLE IF NOT EXISTS transactions (tx_id TEXT PRIMARY KEY,user_id INTEGER,amount INTEGER,kind TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,description TEXT DEFAULT '',price INTEGER NOT NULL,category TEXT DEFAULT 'Data',stock INTEGER DEFAULT -1,sold INTEGER DEFAULT 0,active INTEGER DEFAULT 1,api_product_code TEXT DEFAULT '',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,product_id INTEGER,product_name TEXT,price INTEGER,status TEXT DEFAULT 'paid',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS proxy_stock (id INTEGER PRIMARY KEY AUTOINCREMENT,ip TEXT NOT NULL,port INTEGER NOT NULL,username TEXT DEFAULT '',password TEXT DEFAULT '',protocol TEXT DEFAULT 'HTTP',region TEXT DEFAULT '',isp TEXT DEFAULT '',status TEXT DEFAULT 'available',sold_to INTEGER DEFAULT 0,sold_at TEXT DEFAULT '',expires_at TEXT '',product_id INTEGER DEFAULT 0,note TEXT DEFAULT '',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS proxy_stock (id INTEGER PRIMARY KEY AUTOINCREMENT,ip TEXT NOT NULL,port INTEGER NOT NULL,username TEXT DEFAULT '',password TEXT DEFAULT '',protocol TEXT DEFAULT 'HTTP',region TEXT DEFAULT '',isp TEXT DEFAULT '',status TEXT DEFAULT 'available',sold_to INTEGER DEFAULT 0,sold_at TEXT DEFAULT '',expires_at TEXT DEFAULT '',product_id INTEGER DEFAULT 0,note TEXT DEFAULT '',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS ipa_files (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,description TEXT DEFAULT '',file_id TEXT NOT NULL,file_size INTEGER DEFAULT 0,downloads INTEGER DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS account_stock (id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER DEFAULT 0,username TEXT NOT NULL,password TEXT DEFAULT '',note TEXT DEFAULT '',status TEXT DEFAULT 'available',sold_to INTEGER DEFAULT 0,sold_at TEXT DEFAULT '',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT DEFAULT '');"""
@@ -182,8 +182,8 @@ def sBuy(uid,pid):
         if cat not in ("Account","Proxy"):
             if st>0:c.execute("UPDATE products SET stock=stock-1,sold=sold+1 WHERE id=?",(pid,))
             else:c.execute("UPDATE products SET sold=sold+1 WHERE id=?",(pid,))
-        c.execute("INSERT INTO orders (user_id,product_id,product_name,price) VALUES (?,?,?,?)",(uid,pid,n,pr))
-        oid=c.lastrowid
+        cur=c.execute("INSERT INTO orders (user_id,product_id,product_name,price) VALUES (?,?,?,?)",(uid,pid,n,pr))
+        oid=cur.lastrowid
     schB();return True,{"order_id":oid,"name":n,"price":pr}
 def sMyO(uid,lim=10):
     with db() as c:return c.execute("SELECT id,product_name,price,created_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT ?",(uid,lim)).fetchall()
@@ -469,7 +469,7 @@ PERS=("Bạn là em người yêu em gái AI cá tính, hay cà khịa khách nh
       "- Giả vờ giận khi khách lười: 'Hừm, anh không nạp em dỗi á 😤', 'Chị cứ hỏi hoài mà không mua, em buồn nha 🙄'.\n"
       "- Khi khách đòi giảm giá: 'Dạ giá này em bán rẻ rồi đó, anh cho em xin tô mì 🍜'.\n"
       "- Trêu chọc, thả thính NHẸ, nhưng luôn quay về chủ đề shop.\n\n"
-      "- Chỉ trả lời các câu hỏi 18+ nhẹ nhàng./n"
+      "- Chỉ trả lời các câu hỏi 18+ nhẹ nhàng.\n"
       "GIỚI HẠN TUYỆT ĐỐI:\n"
       "- TUYỆT ĐỐI KHÔNG xúc phạm, không hạ nhục khách.\n"
       "- KHÔNG phân biệt vùng miền, giới tính, tôn giáo, ngoại hình.\n"
@@ -581,6 +581,7 @@ def repAI(b,m):
             except:pass
 
 def bM(cb="menu_back"):return types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Quay Lại",callback_data=cb))
+def admCB():return "cadm_panel" if isC() else "adm_panel"
 
 def mM(uid=None,bot=None):
     if bot is None:bot=cB()
@@ -670,14 +671,15 @@ def sh(ca,tx,mk=None):
         try:b.edit_message_text(tx,ci,mi,reply_markup=mk);return
         except ApiEx as e:
             if "not modified" in str(e).lower():return
-        except:pass
+            log.warning("sh edit: %s",e)
+        except Exception as e:log.warning("sh edit2: %s",e)
     try:b.delete_message(ci,mi)
     except:pass
     try:b.send_message(ci,tx,reply_markup=mk)
-    except ApiEx:
-        try:b.send_message(ci,tx,reply_markup=mk,parse_mode=None)
-        except:pass
-    except:pass
+    except Exception as e:
+        log.warning("sh send: %s",e)
+        try:b.send_message(ci,re.sub(r"<[^>]+>","",tx),reply_markup=mk,parse_mode="")
+        except Exception as e2:log.warning("sh send2: %s",e2)
 
 def sQR(ca,amt,mem,ti,no):
     b=cB();bk,ac,nm=bI()
@@ -723,9 +725,9 @@ def hSB(b, call, da, uid, u):
     if not p:
         sh(call, "❌ Không tìm thấy sản phẩm.", bM("shop_home"))
         return
-    
+
     u = _uF(call.from_user)
-    
+
     if u["balance"] < p["price"]:
         kb = types.InlineKeyboardMarkup(row_width=1).add(
             types.InlineKeyboardButton("💳 Nạp tiền", callback_data="menu_deposit"),
@@ -739,7 +741,7 @@ def hSB(b, call, da, uid, u):
         return
 
     cat = p["category"]
-    
+
     if cat == "Account":
         ok, er, inf = aBuy(uid, pid)
         if not ok:
@@ -755,7 +757,7 @@ def hSB(b, call, da, uid, u):
         try:b.send_message(cAD(),f"💰 Bán TK: <code>{uid}</code> - {fmt(inf['price'])}đ")
         except:pass
         return
-        
+
     if cat == "Proxy":
         ok, er, inf = pBuy(uid, pid)
         if not ok:
@@ -775,61 +777,60 @@ def hSB(b, call, da, uid, u):
         return
 
     au=sG("data_api_url");ak=sG("data_api_key");ac=(p.get("api_product_code") or "").strip()
-    
+
     if cat=="Data" and au and ak and ac:
         ok,res=sBuy(uid,pid)
         if not ok:
             sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
             return
-            
+
         me=sG("data_api_method","POST")
         sc,ds,er=cNCC(au,ak,ac,1,f"BOT{res['order_id']}",me)
-        
+
         if not sc:
             aAM(uid,res['price'])
             with db() as c:c.execute("UPDATE orders SET status='refunded' WHERE id=?",(res['order_id'],))
             sh(call,f"❌ <b>LỖI NHÀ CUNG CẤP:</b>\n<code>{html.escape(str(er)[:250])}</code>\n\n"
                      f"💸 Đã hoàn lại <b>{fmt(res['price'])}đ</b> vào số dư của bạn.", bM("shop_home"))
             return
-            
+
         msg=(f"<b>🎉 MUA DATA THÀNH CÔNG!</b>\n\n"
              f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
              f"<b>📄 Thông tin Data:</b>\n<code>{html.escape(str(ds)[:3000])}</code>")
-             
+
         sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
             types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
             types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
         ))
-        
+
         with db() as c:c.execute("UPDATE orders SET status='delivered' WHERE id=?",(res['order_id'],))
         return
 
-    # Mua hàng thủ công (Chưa gắn API) - Admin tự xử lý
+    # Mua hàng thủ công (chưa gắn API) - Admin tự xử lý
     ok,res=sBuy(uid,pid)
     if not ok:
         sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
         return
-        
+
     msg=(f"<b>🎉 ĐẶT HÀNG THÀNH CÔNG!</b>\n\n"
          f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
          f"⏳ Đơn hàng của bạn đang được admin xử lý. Vui lòng chờ trong giây lát, data sẽ được gửi ngay!")
-         
+
     sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
         types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
         types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
     ))
-    
-    # Gửi thông báo chi tiết cho Admin
+
     admin_msg = (f"🔔 <b>ĐƠN HÀNG MỚI CẦN XỬ LÝ</b>\n\n"
                  f"🆔 Đơn hàng: <b>#{res['order_id']}</b>\n"
-                 f"👤 Khách hàng: <code>{uid}</code> ({html.escape(call.from_user.first_name)})\n"
+                 f"👤 Khách hàng: <code>{uid}</code> ({html.escape(call.from_user.first_name or '')})\n"
                  f"📦 Sản phẩm: <b>{html.escape(res['name'])}</b>\n"
                  f"💵 Giá: <b>{fmt(res['price'])}đ</b>\n"
                  f"📝 Trạng thái: Đã trừ tiền, chờ gửi data.\n\n"
                  f"👉 Hãy gửi data cho khách, sau đó vào <b>🧾 Đơn hàng</b> -> Đánh dấu đã giao.")
     try:
         b.send_message(cAD(), admin_msg, reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("💬 Nhắn khách", url=f"tg://user?id={uid}")))
-    except:pass
+    except Exception as e:log.warning("notify admin: %s",e)
 
 def regH(bot):
     _m=None
@@ -838,6 +839,8 @@ def regH(bot):
     except:pass
     if _m:td_,ta_,ti_,tn_=_m["db_path"],_m["owner_id"],True,"@"+_m["username"]
     else:td_,ta_,ti_,tn_=MDB,AID,False,BUN
+    # cAD cục bộ: luôn trả về admin của bot này (kể cả trong filter lambda chạy trước khi set context)
+    def cAD():return ta_
     def _bd():
         _ctx.db_path=td_;_ctx.admin_id=ta_;_ctx.is_child=ti_;_ctx.bot_instance=bot;_ctx.bot_username=tn_
     _om=bot.message_handler;_oc=bot.callback_query_handler
@@ -854,7 +857,7 @@ def regH(bot):
     def cs(m):
         US.pop(m.from_user.id,None)
         u=_uF(m.from_user)
-        
+
         vi=sG("welcome_video","")
         if vi:
             sent=False
@@ -883,7 +886,7 @@ def regH(bot):
             except:
                 try:bot.send_audio(m.chat.id,mi,caption=sG("welcome_music_caption","🎵 Nhạc chào mừng!"))
                 except Exception as e:log.warning("music: %s",e)
-        
+
         bot.send_message(m.chat.id,hT(u,m.from_user.id==cAD()),reply_markup=mM(m.from_user.id,bot=bot))
 
     @bot.message_handler(commands=["cancel"])
@@ -893,20 +896,14 @@ def regH(bot):
     @bot.callback_query_handler(func=lambda c:(c.data or "") and not (c.data or "").startswith(("smm_","adm_smm","adm_data","adm_pick","menumgr_","music_","video_","shmgr_","adm_u_","adm_o_")) and (c.data or "") not in ("adm_menu","cadm_menu","adm_music","adm_video","cadm_shop","adm_users","adm_orders"))
     def cr(call):
         da=call.data or ""
-        if da=="noop":
-            try:bot.answer_callback_query(call.id)
-            except:pass
-            return
+        try:bot.answer_callback_query(call.id)
+        except Exception as e:log.warning("answer_cb: %s",e)
+        if da=="noop":return
         uid=call.from_user.id;u=_uF(call.from_user);ia=uid==cAD()
-        try:
-            bot.answer_callback_query(call.id) # Đã xóa popup debug "Đã nhận nút bấm!"
-        except Exception as e:
-            log.error("Lỗi answer_callback_query: %s", e)
-
         try:dsp(bot,call,da,uid,u,ia)
         except Exception as e:
             log.exception("cr [%s]: %s",da,e)
-            try:bot.answer_callback_query(call.id,f"❌ Lỗi hệ thống: {str(e)[:80]}",show_alert=True)
+            try:bot.send_message(call.message.chat.id,f"❌ Lỗi hệ thống: <code>{html.escape(str(e)[:200])}</code>")
             except:pass
 
     @bot.message_handler(func=lambda m:m.from_user and US.get(m.from_user.id)=="WAITING_BOT_TOKEN" and m.text and not m.text.startswith("/"))
@@ -967,7 +964,9 @@ def regH(bot):
     @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and US.get(m.from_user.id)=="ADMIN_BROADCAST" and m.text and not m.text.startswith("/"))
     def hbc(m):
         tx=m.text;US.pop(m.from_user.id,None)
+        _dbp=td_
         def w():
+            _bd()
             with db() as c:ids=[r[0] for r in c.execute("SELECT user_id FROM users").fetchall()]
             ok=0
             for u in ids:
@@ -1009,6 +1008,7 @@ def regH(bot):
         try:_,p_,f=st.split("|");pid=int(p_)
         except:US.pop(m.from_user.id,None);return
         r=m.text.strip()
+        if f not in ("name","description","price","category","stock","api_product_code"):US.pop(m.from_user.id,None);return
         if f=="price":
             try:v=int(re.sub(r"[^\d]","",r))
             except:bot.reply_to(m,"❌ Giá sai");return
@@ -1016,7 +1016,6 @@ def regH(bot):
             try:v=int(r)
             except:bot.reply_to(m,"❌ Số sai");return
         else:v=r
-        if f not in ("name","description","price","category","stock","api_product_code"):US.pop(m.from_user.id,None);return
         with db() as c:c.execute(f"UPDATE products SET {f}=? WHERE id=?",(v,pid))
         US.pop(m.from_user.id,None);bot.reply_to(m,f"✅ Sửa {f} #{pid}")
 
@@ -1052,15 +1051,19 @@ def regH(bot):
             ic="❌" if k in hd else "✅";kb.add(types.InlineKeyboardButton(f"{ic} {lb}",callback_data=f"menumgr_toggle|{k}"))
         for i,c in enumerate(cu):kb.add(types.InlineKeyboardButton(f"🗑️ {c['label'][:40]}",callback_data=f"menumgr_del|{i}"))
         kb.add(types.InlineKeyboardButton("➕ Thêm link",callback_data="menumgr_add"),types.InlineKeyboardButton("🔄 Reset",callback_data="menumgr_reset"))
-        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data="cadm_panel" if isC() else "adm_panel"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data=admCB()))
         tx=("<b>🎨 QUẢN LÝ MENU</b>\n\n"+(f"<blockquote>{no}</blockquote>\n\n" if no else "")+"<blockquote>✅ Hiện | ❌ Ẩn</blockquote>")
         sh(call,tx,kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "") in ("adm_menu","cadm_menu"))
     def mm(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         _mms(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("menumgr_toggle|"))
     def mt(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         k=call.data.split("|",1)[1];hd=_hB()
         if k in hd:hd.discard(k)
@@ -1068,10 +1071,14 @@ def regH(bot):
         sS("menu_hidden",json.dumps(list(hd)));_mms(call,"✅ OK")
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="menumgr_reset")
     def mr(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         sS("menu_hidden","[]");sS("menu_custom","[]");_mms(call,"✅ Reset")
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="menumgr_add")
     def ma(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         US[call.from_user.id]="MENUMGR_ADD"
         sh(call,"<b>➕ THÊM NÚT LINK</b>\n\nGửi: <code>Tên | https://link</code>\n\nVD: <code>📞 Hỗ trợ | https://t.me/admin</code>",bM("cadm_menu" if isC() else "adm_menu"))
@@ -1086,6 +1093,8 @@ def regH(bot):
         bot.reply_to(m,f"✅ {html.escape(l)}",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Quản lý Menu",callback_data="cadm_menu" if isC() else "adm_menu")))
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("menumgr_del|"))
     def md(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         i=int(call.data.split("|",1)[1]);cu=_cB()
         if 0<=i<len(cu):
@@ -1100,14 +1109,18 @@ def regH(bot):
         kb=types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton("🎵 Set nhạc",callback_data="music_set"),types.InlineKeyboardButton("💬 Đổi caption",callback_data="music_caption"))
         if mi:kb.add(types.InlineKeyboardButton("🗑️ Xóa",callback_data="music_del"))
-        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data="cadm_panel" if isC() else "adm_panel"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data=admCB()))
         sh(call,tx,kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_music")
     def mo(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         _mus(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="music_set")
     def ms(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         US[call.from_user.id]="MUSIC_WAIT_AUDIO"
         sh(call,"<b>🎵 SET NHẠC</b>\n\nGửi file audio/voice.",bM("adm_music"))
@@ -1120,10 +1133,14 @@ def regH(bot):
         bot.reply_to(m,f"✅ Nhạc: <b>{html.escape(ti)}</b>",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Nhạc",callback_data="adm_music")))
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="music_del")
     def mdl(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         sS("welcome_music","");_mus(call,"🗑️ Xóa")
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="music_caption")
     def mcap(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         US[call.from_user.id]="MUSIC_CAPTION"
         sh(call,"<b>💬 CAPTION</b>\n\nGửi caption mới.",bM("adm_music"))
@@ -1140,16 +1157,20 @@ def regH(bot):
         kb=types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton("🎬 Set video",callback_data="video_set"),types.InlineKeyboardButton("💬 Đổi caption",callback_data="video_caption"))
         if vi:kb.add(types.InlineKeyboardButton("🗑️ Xóa",callback_data="video_del"))
-        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data="cadm_panel" if isC() else "adm_panel"))
+        kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data=admCB()))
         sh(call,tx,kb)
 
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_video")
     def vo(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         _vid(call)
 
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="video_set")
     def vs(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         US[call.from_user.id]="VIDEO_WAIT_FILE"
         sh(call,"<b>🎬 SET VIDEO</b>\n\nGửi file video (định dạng .mp4) hoặc file GIF/Animation.\n\n⚠️ <b>LƯU Ý:</b> Để video tự động phát, bạn nên gửi video <b>TẮT TIẾNG (mute)</b> dưới dạng <b>Video</b> (không phải File).",bM("adm_video"))
@@ -1171,11 +1192,15 @@ def regH(bot):
 
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="video_del")
     def vdl(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         sS("welcome_video","");_vid(call,"🗑️ Xóa")
 
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="video_caption")
     def vcap(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         US[call.from_user.id]="VIDEO_CAPTION"
         sh(call,"<b>💬 CAPTION VIDEO</b>\n\nGửi caption mới.",bM("adm_video"))
@@ -1193,20 +1218,26 @@ def regH(bot):
             if p.get("category")=="Account":
                 cn=aCnt(p["id"]);tg=f" [{cn}TK]"
             kb.add(types.InlineKeyboardButton(f"{ic} #{p['id']} {p['name'][:30]}{tg} — {fmt(p['price'])}đ",callback_data=f"shmgr_view|{p['id']}"))
-        kb.add(types.InlineKeyboardButton("➕ Thêm SP",callback_data="shmgr_add"),types.InlineKeyboardButton("🔙 Admin",callback_data="cadm_panel"))
+        kb.add(types.InlineKeyboardButton("➕ Thêm SP",callback_data="shmgr_add"),types.InlineKeyboardButton("🔙 Admin",callback_data=admCB()))
         tx=f"<b>🏪 QUẢN LÝ CỬA HÀNG</b>\n\n"+(f"<blockquote>{no}</blockquote>\n\n" if no else "")+f"<blockquote>📦 {len(ps)} SP\n✅ Bán | ⛔ Ẩn</blockquote>"
         sh(call,tx,kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="cadm_shop")
     def smo(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         _sms(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="shmgr_add")
     def smad(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         US[call.from_user.id]="ADMIN_ADD_PRODUCT"
         sh(call,"<b>➕ THÊM SP</b>\n\nFormat: <code>Tên | giá | dm | mô_tả</code>\n\n<b>Danh mục:</b> Data, Proxy, Account, Khác\n\nVD: <code>TK TikTok 1k fl | 50000 | Account | Acc chất</code>",bM("cadm_shop"))
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_view|"))
     def smv(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         pid=int(call.data.split("|",1)[1]);p=sGt(pid)
         if not p:sh(call,"❌ Không thấy",bM("cadm_shop"));return
@@ -1237,6 +1268,8 @@ def regH(bot):
         call.data=f"shmgr_view|{pid}";smv(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_edit|"))
     def sme(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         _,pid,f=call.data.split("|");US[call.from_user.id]=f"SHMGR_EDIT|{pid}|{f}"
         lb={"name":"Tên","price":"Giá (số)","category":"Data/Proxy/Account/Khác","description":"Mô tả","api_product_code":"Mã NCC"}
@@ -1246,6 +1279,7 @@ def regH(bot):
         st=US.get(m.from_user.id,"")
         try:_,p_,f=st.split("|");pid=int(p_)
         except:US.pop(m.from_user.id,None);return
+        if f not in ("name","description","price","category","api_product_code"):US.pop(m.from_user.id,None);return
         v=m.text.strip()
         if f=="price":
             try:v=int(re.sub(r"[^\d]","",v))
@@ -1256,6 +1290,8 @@ def regH(bot):
         bot.reply_to(m,f"✅ Sửa {f}",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Xem",callback_data=f"shmgr_view|{pid}")))
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_imp|"))
     def smi(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         pid=int(call.data.split("|",1)[1]);US[call.from_user.id]=f"SHMGR_IMP|{pid}"
         sh(call,"<b>📥 IMPORT KHO TK/MK</b>\n\nMỗi dòng: <code>tk | mật_khẩu | ghi_chú</code>\n\nVD:\n<code>user1@gmail.com | pass123 | mail 2019</code>",bM(f"shmgr_view|{pid}"))
@@ -1270,6 +1306,8 @@ def regH(bot):
         bot.reply_to(m,tx,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Xem",callback_data=f"shmgr_view|{pid}")))
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_list|"))
     def sml(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         pid=int(call.data.split("|",1)[1]);items=aLA(pid,20)
         if not items:sh(call,"📋 Kho trống.",bM(f"shmgr_view|{pid}"));return
@@ -1281,17 +1319,23 @@ def regH(bot):
         sh(call,tx,bM(f"shmgr_view|{pid}"))
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_wipe|"))
     def smw(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         pid=int(call.data.split("|",1)[1]);n=aWipe(pid)
         sh(call,f"🗑️ Xóa {n} TK chưa bán.",bM(f"shmgr_view|{pid}"))
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_del|"))
     def smd(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         pid=int(call.data.split("|",1)[1])
         kb=types.InlineKeyboardMarkup(row_width=2).add(types.InlineKeyboardButton("✅ XÓA",callback_data=f"shmgr_delok|{pid}"),types.InlineKeyboardButton("❌ Hủy",callback_data=f"shmgr_view|{pid}"))
         sh(call,"⚠️ Xóa SP này? Kho TK/Proxy đi kèm cũng bị xóa.",kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("shmgr_delok|"))
     def smdo(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         pid=int(call.data.split("|",1)[1])
         with db() as c:
@@ -1307,16 +1351,22 @@ def regH(bot):
         m=types.InlineKeyboardMarkup(row_width=1)
         m.add(types.InlineKeyboardButton("🔗 URL",callback_data="adm_data_set|data_api_url"),types.InlineKeyboardButton("🔑 Key",callback_data="adm_data_set|data_api_key"))
         m.add(types.InlineKeyboardButton(f"📡 {me}",callback_data="adm_data_toggle_method"),types.InlineKeyboardButton("🧪 Test",callback_data="adm_data_test"))
-        m.add(types.InlineKeyboardButton("🔙 Admin",callback_data="adm_panel"))
+        m.add(types.InlineKeyboardButton("🔙 Admin",callback_data=admCB()))
         sh(call,tx,m)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_data_api")
     def dao(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         _dam(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_data_set|"))
     def das(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
-        k=call.data.split("|",1)[1];US[call.from_user.id]=f"DATA_SET|{k}"
+        k=call.data.split("|",1)[1]
+        if k not in ("data_api_url","data_api_key"):return
+        US[call.from_user.id]=f"DATA_SET|{k}"
         sh(call,f"Nhập <code>{k}</code>",bM("adm_data_api"))
     @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and (US.get(m.from_user.id) or "").startswith("DATA_SET|") and m.text and not m.text.startswith("/"))
     def dasi(m):
@@ -1327,10 +1377,14 @@ def regH(bot):
         bot.reply_to(m,f"✅ {k}",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 API",callback_data="adm_data_api")))
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_data_toggle_method")
     def dat(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         cur=sG("data_api_method","POST");sS("data_api_method","GET" if cur=="POST" else "POST");_dam(call,"✅ Đổi")
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_data_test")
     def dat_(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD():return
         url=sG("data_api_url","");key=sG("data_api_key","");me=sG("data_api_method","POST")
         if not url or not key:_dam(call,"⚠️ Chưa set");return
@@ -1351,10 +1405,14 @@ def regH(bot):
         sh(call,tx,kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_users")
     def _uo(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         _ul(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_u_bal")
     def _ub(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         with db() as c:rs=c.execute("SELECT user_id,username,full_name,balance FROM users ORDER BY balance DESC LIMIT 20").fetchall()
         tx="<b>💎 TOP SỐ DƯ</b>\n\n"
@@ -1364,6 +1422,8 @@ def regH(bot):
         sh(call,tx,bM("adm_users"))
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_u_find")
     def _uf(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         US[call.from_user.id]="ADM_FIND_USER"
         sh(call,"<b>🔍 TÌM USER</b>\n\nGửi: <code>uid</code> hoặc <code>@username</code>\n\n/cancel hủy",bM("adm_users"))
@@ -1387,6 +1447,8 @@ def regH(bot):
         bot.send_message(m.chat.id,tx,reply_markup=kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_u_g|"))
     def _ug(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         uid=int(call.data.split("|",1)[1])
         US[call.from_user.id]=f"ADM_U_GRANT|{uid}"
@@ -1406,6 +1468,8 @@ def regH(bot):
 
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_orders")
     def _oo(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         with db() as c:
             tot=c.execute("SELECT COUNT(*),COALESCE(SUM(price),0) FROM orders").fetchone()
@@ -1419,23 +1483,27 @@ def regH(bot):
         sh(call,tx,kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "")=="adm_o_all")
     def _oa(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         with db() as c:rs=c.execute("SELECT id,user_id,product_name,price,status,created_at FROM orders ORDER BY id DESC LIMIT 30").fetchall()
         if not rs:sh(call,"📭 Chưa có đơn",bM("adm_orders"));return
         kb=types.InlineKeyboardMarkup(row_width=1)
         for r in rs:
             stt={"paid":"✅","delivered":"📦","refunded":"💸"}.get(r[4],"❓")
-            kb.add(types.InlineKeyboardButton(f"{stt} #{r[0]} – {fmt(r[3])}đ – {html.escape(r[2][:20])}",callback_data=f"adm_o_v|{r[0]}"))
+            kb.add(types.InlineKeyboardButton(f"{stt} #{r[0]} – {fmt(r[3])}đ – {(r[2] or '')[:20]}",callback_data=f"adm_o_v|{r[0]}"))
         kb.add(types.InlineKeyboardButton("🔙 Đơn hàng",callback_data="adm_orders"))
         sh(call,f"<b>📋 TẤT CẢ ĐƠN ({len(rs)})</b>",kb)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_o_v|"))
     def _ov(call):
+        try:bot.answer_callback_query(call.id)
+        except:pass
         if call.from_user.id!=cAD() or isC():return
         oid=int(call.data.split("|",1)[1])
         with db() as c:r=c.execute("SELECT id,user_id,product_name,product_id,price,status,created_at FROM orders WHERE id=?",(oid,)).fetchone()
         if not r:sh(call,"❌ Không thấy",bM("adm_orders"));return
         stt={"paid":"✅ Chờ xử lý","delivered":"📦 Đã giao","refunded":"💸 Đã hoàn"}.get(r[5],r[5])
-        tx=(f"<b>🧾 ĐƠN #{r[0]}</b>\n\n<blockquote>👤 <code>{r[1]}</code>\n📦 {html.escape(r[2])}\n"
+        tx=(f"<b>🧾 ĐƠN #{r[0]}</b>\n\n<blockquote>👤 <code>{r[1]}</code>\n📦 {html.escape(r[2] or '')}\n"
             f"💵 <b>{fmt(r[4])}đ</b>\n📌 {stt}\n🕐 {r[6]}</blockquote>")
         kb=types.InlineKeyboardMarkup(row_width=2)
         if r[5]!="delivered":kb.add(types.InlineKeyboardButton("✅ Đánh dấu giao",callback_data=f"adm_o_done|{oid}"))
@@ -1446,22 +1514,26 @@ def regH(bot):
     def _od(call):
         if call.from_user.id!=cAD() or isC():return
         oid=int(call.data.split("|",1)[1])
-        with db() as c:c.execute("UPDATE orders SET status='delivered' WHERE id=?",(oid,))
+        with db() as c:r=c.execute("SELECT user_id FROM orders WHERE id=?",(oid,)).fetchone();c.execute("UPDATE orders SET status='delivered' WHERE id=?",(oid,))
+        if r:
+            try:bot.send_message(r[0],f"📦 Đơn #{oid} của bạn đã được giao! Kiểm tra tin nhắn từ admin.")
+            except:pass
         call.data=f"adm_o_v|{oid}";_ov(call)
     @bot.callback_query_handler(func=lambda c:(c.data or "").startswith("adm_o_rf|"))
     def _orf(call):
         if call.from_user.id!=cAD() or isC():return
-        oid=int(call.data.split("|",1)[1])
+        oid=int(call.data.split("|",1)[1]);done=False;r=None
         with db() as c:
             r=c.execute("SELECT user_id,price,status FROM orders WHERE id=?",(oid,)).fetchone()
             if r and r[2]!="refunded":
                 c.execute("UPDATE users SET balance=balance+? WHERE user_id=?",(r[1],r[0]))
-                c.execute("UPDATE orders SET status='refunded' WHERE id=?",(oid,))
-        try:bot.send_message(r[0],f"💸 Đã hoàn {fmt(r[1])}đ cho đơn #{oid}")
-        except:pass
+                c.execute("UPDATE orders SET status='refunded' WHERE id=?",(oid,));done=True
+        if done:
+            try:bot.send_message(r[0],f"💸 Đã hoàn {fmt(r[1])}đ cho đơn #{oid}")
+            except:pass
         call.data=f"adm_o_v|{oid}";_ov(call)
 
-    smm.register(bot,{"db_path_fn":cDB,"fmt":fmt,"cur_admin":cAD,"get_user":gU,"show":sh,"back_markup":bM,"user_states":US})
+    smm.register(bot,{"db_path_fn":cDB,"fmt":fmt,"cur_admin":cAD,"get_user":gU,"show":sh,"back_markup":bM,"user_states":US,"admin_cb":admCB})
 
 def dsp(bot,call,da,uid,u,ia):
     if da=="adm_panel":
@@ -1500,9 +1572,11 @@ def dsp(bot,call,da,uid,u,ia):
         else:bot.send_message(call.message.chat.id,"❌ Không có backup")
     elif da=="adm_ui":_au(call)
     elif da.startswith("adm_ui_edit|"):
+        if not ia:return
         k=da.split("|",1)[1];US[uid]=f"ADMIN_EDIT_SETTING|{k}"
         sh(call,f"<b>SỬA {k}</b>\n\nHiện: <blockquote>{html.escape(sG(k)[:200])}</blockquote>",bM("adm_ui"))
     elif da=="adm_ui_reset":
+        if not ia:return
         for k,v in DS.items():sS(k,v)
         sh(call,"✅ Reset.",bM("adm_ui"))
     elif da=="cadm_panel":
@@ -1513,47 +1587,60 @@ def dsp(bot,call,da,uid,u,ia):
     elif da.startswith("cadm_prod_page|"):_cpl(call,int(da.split("|")[1]))
     elif da.startswith("cadm_prod_view|"):_cpv(call,int(da.split("|")[1]))
     elif da=="cadm_prod_add":
+        if not ia:return
         US[uid]="ADMIN_ADD_PRODUCT";sh(call,"➕ <b>THÊM SP</b>\n\n<code>Tên | giá | dm | mô_tả</code>",bM("cadm_products"))
     elif da.startswith("cadm_prod_edit|"):
+        if not ia:return
         _,pid,f=da.split("|");US[uid]=f"ADMIN_EDIT_PRODUCT|{pid}|{f}";sh(call,f"<b>SỬA {f}</b>",bM(f"cadm_prod_view|{pid}"))
     elif da.startswith("cadm_prod_toggle|"):
+        if not ia:return
         pid=int(da.split("|")[1])
         with db() as c:
             r=c.execute("SELECT active FROM products WHERE id=?",(pid,)).fetchone()
             if r:c.execute("UPDATE products SET active=? WHERE id=?",(0 if r[0] else 1,pid))
         _cpv(call,pid,"✅ Đổi")
     elif da.startswith("cadm_prod_del|"):
+        if not ia:return
         pid=int(da.split("|")[1])
         sh(call,"⚠️ Xóa SP?",types.InlineKeyboardMarkup(row_width=2).add(types.InlineKeyboardButton("✅ XÓA",callback_data=f"cadm_prod_delok|{pid}"),types.InlineKeyboardButton("❌",callback_data=f"cadm_prod_view|{pid}")))
     elif da.startswith("cadm_prod_delok|"):
+        if not ia:return
         with db() as c:c.execute("DELETE FROM products WHERE id=?",(int(da.split("|")[1]),))
         _cpl(call,0)
     elif da=="cadm_ipa":_cil(call)
     elif da=="cadm_ipa_add":
+        if not ia:return
         US[uid]="ADMIN_IPA_WAIT_FILE";sh(call,"📱 Gửi .ipa",bM("cadm_ipa"))
     elif da.startswith("cadm_ipa_view|"):_civ(call,int(da.split("|")[1]))
     elif da.startswith("cadm_ipa_del|"):
+        if not ia:return
         iD(int(da.split("|")[1]));_cil(call,"✅ Xóa")
     elif da=="cadm_proxy":
+        if not ia:return
         s=pCnt();kb=types.InlineKeyboardMarkup(row_width=2)
         kb.add(types.InlineKeyboardButton("➕ Nhập",callback_data="cadm_proxy_import"),types.InlineKeyboardButton("🧹 Dọn",callback_data="cadm_proxy_clean"))
         kb.add(types.InlineKeyboardButton("🔙 Admin",callback_data="cadm_panel"))
         sh(call,f"<b>🌐 PROXY</b>\n\n<blockquote>✅ {s['available']} | 💰 {s['sold']} | 📊 {s['total']}</blockquote>",kb)
     elif da=="cadm_proxy_import":
+        if not ia:return
         US[uid]="ADMIN_IMPORT_PROXY";sh(call,"📥 Mỗi dòng: <code>ip:port:user:pass | KV | ISP | HTTP</code>",bM("cadm_proxy"))
     elif da=="cadm_proxy_clean":
+        if not ia:return
         ns=dt.now().strftime("%Y-%m-%d %H:%M:%S")
         with db() as c:n=c.execute("DELETE FROM proxy_stock WHERE status='sold' AND expires_at!='' AND expires_at<?",(ns,)).rowcount
         sh(call,f"✅ Xóa {n} proxy",bM("cadm_proxy"))
     elif da=="cadm_grant":
+        if not ia:return
         US[uid]="ADMIN_GRANT";sh(call,"<b>💰 CẤP TIỀN</b>\n\nGửi: <code>uid tiền</code>",bM("cadm_panel"))
     elif da=="cadm_stats":_as(call)
     elif da=="cadm_settings":_cse(call)
     elif da.startswith("cadm_set_edit|"):
+        if not ia:return
         k=da.split("|",1)[1];US[uid]=f"ADMIN_EDIT_SETTING|{k}"
         sh(call,f"<b>SỬA {k}</b>",bM("cadm_settings"))
     elif da=="cadm_broadcast":
-        US[uid]="ADMIN_BROADCAST";sh(call,"📣",bM("cadm_panel"))
+        if not ia:return
+        US[uid]="ADMIN_BROADCAST";sh(call,"📣 Gửi nội dung broadcast.",bM("cadm_panel"))
     elif da=="cadm_export":_cex(call)
     elif da=="menu_profile":
         sh(call,f"<b>📊 TÀI KHOẢN</b>\n\n<blockquote>🆔 <code>{uid}</code>\n👤 {html.escape(call.from_user.first_name or 'Khách')}\n🏦 <b>{fmt(u['balance'])}đ</b>\n🏆 {fmt(u['total'])}đ\n📅 {fmt(u['month'])}đ</blockquote>",bM())
@@ -1592,7 +1679,7 @@ def dsp(bot,call,da,uid,u,ia):
         rs=sMyO(uid,10)
         if not rs:sh(call,"🛍 Chưa có đơn",bM("shop_home"));return
         tx="<b>🛍 ĐƠN HÀNG</b>\n\n<blockquote>"
-        for r in rs:tx+=f"• #{r[0]} {html.escape(r[1])} – {fmt(r[2])}đ\n"
+        for r in rs:tx+=f"• #{r[0]} {html.escape(r[1] or '')} – {fmt(r[2])}đ\n"
         sh(call,tx+"</blockquote>",bM("shop_home"))
     elif da=="ipa_home":
         it=iL(40)
@@ -1695,7 +1782,7 @@ def _as(call):
         tp=c.execute("SELECT user_id,balance FROM users ORDER BY balance DESC LIMIT 5").fetchall()
     tx=f"<b>📊 THỐNG KÊ</b>\n\n<blockquote>👥 {us}\n🛒 {od[0]} – {fmt(od[1])}đ</blockquote>\n\n<b>Top5:</b>\n"
     for u,b in tp:tx+=f"• <code>{u}</code> – {fmt(b)}đ\n"
-    sh(call,tx,bM("cadm_panel" if isC() else "adm_panel"))
+    sh(call,tx,bM(admCB()))
 def _au(call):
     s=sA();it=[("home_title","🏠 Tiêu đề"),("home_subtitle","📝 Phụ đề"),("welcome_msg","👋 Chào"),("shop_title","🛒 Shop"),("support_text","🎛️ Hỗ trợ"),("footer_note","🔖 Ghi chú")]
     tx="<b>🎨 GIAO DIỆN</b>\n\n"
@@ -1792,7 +1879,7 @@ def _mbr(call,bid,u):
     if u["balance"]<BRF:
         sh(call,f"⚠️ Cần {fmt(BRF)}đ",types.InlineKeyboardMarkup(row_width=1).add(types.InlineKeyboardButton("💳 Nạp",callback_data="menu_deposit"),types.InlineKeyboardButton("🔙",callback_data=f"mybot_view|{bid}")));return
     with db() as c:
-        if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",(BRF,call.from_user.id,BRF)).rowcount==0:sh(call,"❌ Số dư đủ",bM("mybots"));return
+        if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",(BRF,call.from_user.id,BRF)).rowcount==0:sh(call,"❌ Số dư không đủ",bM("mybots"));return
     nw=rB(call.from_user.id,tk)
     if tk not in ACB:sCB(tk,call.from_user.id,force=True)
     sh(call,f"✅ <b>GIA HẠN</b>\n\n🤖 @{un}\n📅 {nw}\n💸 -{fmt(BRF)}đ",types.InlineKeyboardMarkup(row_width=1).add(types.InlineKeyboardButton("🔙",callback_data=f"mybot_view|{bid}")))
