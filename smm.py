@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Module Buff Mạng Xã Hội — Full chức năng (Tìm kiếm + Tên gọn)"""
+"""Module Buff Mạng Xã Hội — Full chức năng (Toggle bật/tắt DV)"""
 import os, re, time, html, json, sqlite3, logging, threading
 from datetime import datetime
 import requests
@@ -169,6 +169,7 @@ def svc_update(p, sid, f, v):
     if f not in ("platform","name","api_service","cost","price","min","max","custom_price","active"): return
     _q(p, f"UPDATE smm_services SET {f}=? WHERE id=?", (v, sid))
 def svc_del(p, sid): _q(p, "DELETE FROM smm_services WHERE id=?", (sid,))
+def svc_del_by_api(p, api_id): _q(p, "DELETE FROM smm_services WHERE api_service=?", (str(api_id),))
 def svc_toggle(p, sid):
     r = _q(p, "SELECT active FROM smm_services WHERE id=?", (sid,), "one")
     if not r: return None
@@ -273,17 +274,12 @@ def _parse_service(s, rate, markup, currency_mode="auto", multiplier=1.0):
     return nm, cat, cost, price, mn, mx, api_rate
 
 def _format_svc_name(raw_name, api_id=""):
-    """Rút gọn tên dịch vụ để hiển thị trên nút"""
     nm = str(raw_name or "")
-    # Bỏ "Server #ID - " hoặc "Server #ID | "
     nm = re.sub(r"^Server\s*#\d+\s*[-|]\s*", "", nm, flags=re.IGNORECASE)
-    # Bỏ tên Platform ở đầu (TikTok, Facebook, ...)
     for p, _ in PLATFORMS:
         nm = re.sub(rf"^{p}\s*[-|]?\s*", "", nm, flags=re.IGNORECASE)
     nm = nm.strip()
     if len(nm) > 25: nm = nm[:24] + "…"
-    
-    # Trích xuất ID Server
     m = re.search(r"Server\s*#(\d+)", str(raw_name), re.IGNORECASE)
     id_str = f"[{m.group(1)}] " if m else (f"[{api_id}] " if api_id else "")
     return f"{id_str}{nm}"
@@ -346,7 +342,6 @@ def register(bot, h):
     dbp = h["db_path_fn"]
     admin_cb = h.get("admin_cb") or (lambda: "adm_panel")
 
-    # Lưu trữ tạm kết quả tìm kiếm
     _temp_search = {}
 
     def _safe(fn):
@@ -707,7 +702,6 @@ def register(bot, h):
             bot.reply_to(m, f"❌ Không tìm thấy dịch vụ nào khớp với '<code>{html.escape(keyword)}</code>'.", parse_mode="HTML")
             return
         
-        # Lưu kết quả tìm kiếm tạm thời
         _temp_search[m.from_user.id] = matched
         _show_search_results(m.chat.id, m.from_user.id, matched, 0, is_msg=True)
 
@@ -738,7 +732,7 @@ def register(bot, h):
         txt = (f"<b>🔍 KẾT QUẢ TÌM KIẾM</b>\n\n"
                f"<blockquote>📊 Tìm thấy: <b>{len(matched)}</b> DV\n"
                f"📄 Trang {page+1}/{tp}\n"
-               f"💡 Bấm để thêm DV</blockquote>")
+               f"💡 Bấm để thêm/xóa DV</blockquote>")
         
         if is_msg:
             bot.send_message(chat_id, txt, reply_markup=m, parse_mode="HTML")
@@ -775,16 +769,18 @@ def register(bot, h):
             if sid == api_id: found = s; break
         if not found:
             bot.send_message(call.message.chat.id, "❌ Không tìm thấy DV trong cache."); return
-        if not svc_exists(bp, api_id):
+        
+        # TOGGLE: Nếu có rồi thì xóa, chưa có thì thêm
+        if svc_exists(bp, api_id):
+            svc_del_by_api(bp, api_id)
+            bot.answer_callback_query(call.id, f"✅ Đã xóa DV khỏi danh sách")
+        else:
             rate = _get_rate(bp); markup = _get_markup(bp)
             nm, cat, cost, price, mn, mx, _ = _parse_service(found, rate, markup, _get_currency(bp), _get_mult(bp))
             pl = _norm_cache_platform(found)
             svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
-            bot.answer_callback_query(call.id, f"✅ Đã thêm DV #{api_id}")
-        else:
-            bot.answer_callback_query(call.id, "ℹ️ DV này đã có trong danh sách bán")
+            bot.answer_callback_query(call.id, f"✅ Đã thêm DV vào danh sách")
         
-        # Load lại kết quả tìm kiếm hiện tại
         matched = _temp_search.get(call.from_user.id, [])
         _temp_search[f"{call.from_user.id}_msg_id"] = call.message.message_id
         _show_search_results(call.message.chat.id, call.from_user.id, matched, page)
@@ -855,7 +851,7 @@ def register(bot, h):
         m.add(types.InlineKeyboardButton("🔙", callback_data=f"adm_pick_plat|{pl}"))
         show(call, f"<b>📥 {pl} · {sub}</b>\n\n"
                    f"<blockquote>📊 {len(matched)} DV · Trang {page+1}/{tp}\n"
-                   f"💡 Bấm để thêm DV</blockquote>", m)
+                   f"💡 Bấm ✅ để xóa, bấm ➕ để thêm</blockquote>", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_pick_do|"))
     @_safe
@@ -873,10 +869,17 @@ def register(bot, h):
             if sid == api_id: found = s; break
         if not found:
             bot.send_message(call.message.chat.id, "❌ Không tìm thấy DV trong cache."); return
-        if not svc_exists(bp, api_id):
+        
+        # TOGGLE: Nếu có rồi thì xóa, chưa có thì thêm
+        if svc_exists(bp, api_id):
+            svc_del_by_api(bp, api_id)
+            bot.answer_callback_query(call.id, f"✅ Đã xóa DV khỏi danh sách")
+        else:
             rate = _get_rate(bp); markup = _get_markup(bp)
             nm, cat, cost, price, mn, mx, _ = _parse_service(found, rate, markup, _get_currency(bp), _get_mult(bp))
             svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
+            bot.answer_callback_query(call.id, f"✅ Đã thêm DV vào danh sách")
+            
         call.data = f"adm_pick_sub|{pl}|{sub}|{page}"
         _pick_sub(call)
 
