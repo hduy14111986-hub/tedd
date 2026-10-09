@@ -1,5 +1,4 @@
-"""BOT TE
-LEGRAM MULTI-TENANT — Groq AI"""
+"""BOT TELEGRAM MULTI-TENANT — Groq AI"""
 import os,re,time,html,hmac,sqlite3,logging,threading,urllib.parse as up,json
 from collections import deque
 from contextlib import contextmanager
@@ -82,7 +81,6 @@ CREATE TABLE IF NOT EXISTS account_stock (id INTEGER PRIMARY KEY AUTOINCREMENT,p
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT DEFAULT '');"""
 MO="""CREATE TABLE IF NOT EXISTS user_bots (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,bot_token TEXT UNIQUE,bot_username TEXT,status TEXT DEFAULT 'active',expires_at TEXT DEFAULT '',plan TEXT DEFAULT 'basic',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"""
 
-# [CHỨC NĂNG VIDEO MỚI] Đã thêm welcome_video và welcome_video_caption
 DS={"home_title":"🚀 HỆ THỐNG BOT ĐA NĂNG","home_subtitle":"Data • Proxy • IPA • AI • SMM","welcome_msg":"Chào mừng! Nhắn tin để chat AI.","shop_title":"🛒 CỬA HÀNG","support_text":"Nhắn admin để được hỗ trợ!","footer_note":"Cảm ơn bạn! ❤️","bank_name":"","account_no":"","account_name":"","data_api_url":"","data_api_key":"","data_api_method":"POST","welcome_music":"","welcome_music_caption":"🎵 Nhạc chào mừng!","welcome_video":"","welcome_video_caption":"🎬 Video chào mừng!","menu_hidden":"[]","menu_custom":"[]"}
 DP=[("🌐 Data 30K – Không giới hạn",30000,"Data","Gói KHÔNG GIỚI HẠN data 30 ngày."),("🌐 Data 50K – Không giới hạn",50000,"Data","Gói KHÔNG GIỚI HẠN data 30 ngày."),("🌐 Proxy dân cư VN 30 ngày",50000,"Proxy","Proxy dân cư VN, không giới hạn băng thông.")]
 
@@ -99,7 +97,8 @@ def iDB(p=None,main=False):
         except:pass
         for k,v in DS.items():c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)",(k,v))
         if c.execute("SELECT COUNT(*) FROM products").fetchone()[0]==0:
-            for n,pr,cat,de in DP:c.execute("INSERT INTO products (name,description,price,category) VALUES (?,?,?,?)",(n,de,pr,cat))
+            # FIX: Thêm stock = -1 (vô hạn) cho sản phẩm mặc định để không bị lỗi hết hàng
+            for n,pr,cat,de in DP:c.execute("INSERT INTO products (name,description,price,category,stock) VALUES (?,?,?,?,-1)",(n,de,pr,cat))
         c.commit()
     finally:c.close()
     try:smm.init_schema(p)
@@ -176,10 +175,11 @@ def sGt(pid):
 def sBuy(uid,pid):
     with db() as c:
         r=c.execute("SELECT name,price,stock,active,category FROM products WHERE id=?",(pid,)).fetchone()
-        if not r:return False,"Không tìm thấy"
+        if not r:return False,"Không tìm thấy sản phẩm"
         n,pr,st,ac,cat=r
-        if not ac:return False,"Ngừng bán"
-        if cat not in ("Account","Proxy") and st==0:return False,"Hết hàng"
+        if not ac:return False,"Sản phẩm đã ngừng bán"
+        # FIX: Chỉ chặn nếu là Data/khác và stock thực sự bằng 0 (không phải -1)
+        if cat not in ("Account","Proxy") and st==0:return False,"Sản phẩm đã hết hàng"
         if c.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",(pr,uid,pr)).rowcount==0:return False,"Số dư không đủ"
         if cat not in ("Account","Proxy"):
             if st>0:c.execute("UPDATE products SET stock=stock-1,sold=sold+1 WHERE id=?",(pid,))
@@ -620,7 +620,7 @@ def aM():
         m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="cadm_stats"),types.InlineKeyboardButton("⚙️ Cài đặt",callback_data="cadm_settings"))
         m.add(types.InlineKeyboardButton("📣 Thông báo",callback_data="cadm_broadcast"),types.InlineKeyboardButton("📤 Xuất DB",callback_data="cadm_export"))
         m.add(types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="cadm_menu"),types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"))
-        m.add(types.InlineKeyboardButton("🎬 Video chào mừng",callback_data="adm_video")) # [CHỨC NĂNG VIDEO MỚI]
+        m.add(types.InlineKeyboardButton("🎬 Video chào mừng",callback_data="adm_video"))
         m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
         return m
     m=types.InlineKeyboardMarkup(row_width=2)
@@ -630,7 +630,7 @@ def aM():
     m.add(types.InlineKeyboardButton("📊 Thống kê",callback_data="adm_stats"),types.InlineKeyboardButton("💰 Cấp tiền",callback_data="adm_grant"))
     m.add(types.InlineKeyboardButton("🎨 Giao diện",callback_data="adm_ui"),types.InlineKeyboardButton("📣 Thông báo",callback_data="adm_broadcast"))
     m.add(types.InlineKeyboardButton("💾 Backup",callback_data="adm_backup"),types.InlineKeyboardButton("🎨 Quản lý Menu",callback_data="adm_menu"))
-    m.add(types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"),types.InlineKeyboardButton("🎬 Video chào mừng",callback_data="adm_video")) # [CHỨC NĂNG VIDEO MỚI]
+    m.add(types.InlineKeyboardButton("🎵 Nhạc chào mừng",callback_data="adm_music"),types.InlineKeyboardButton("🎬 Video chào mừng",callback_data="adm_video"))
     m.add(types.InlineKeyboardButton("📥 Restore DB",callback_data="adm_restore"))
     m.add(types.InlineKeyboardButton("🔙 Menu chính",callback_data="menu_back"))
     return m
@@ -659,10 +659,12 @@ def pDT(p):
     else:st="♾️" if p["stock"]<0 else ("❌ Hết" if p["stock"]==0 else f"📦 {p['stock']}")
     at=" 🤖 Auto" if (p.get("api_product_code") or "").strip() and sG("data_api_url") else ""
     return f"<b>📦 {html.escape(p['name'])}</b>\n\n<blockquote>{html.escape(p['description'][:400])}\n\n📂 <b>{html.escape(p['category'])}</b>{at}\n💵 <b>{fmt(p['price'])}đ</b>\n{st} | 🔥 {p['sold']}</blockquote>"
-def pMK(pid,st):
-    m=types.InlineKeyboardMarkup(row_width=1)
-    if st!=0:m.add(types.InlineKeyboardButton("🛒 Mua Ngay",callback_data=f"shop_buy|{pid}"))
-    m.add(types.InlineKeyboardButton("🔙 Cửa Hàng",callback_data="shop_home"))
+
+# FIX: Luôn hiển thị nút Mua Ngay để người dùng có thể bấm và nhận thông báo lỗi nếu có
+def pMK(pid, st):
+    m = types.InlineKeyboardMarkup(row_width=1)
+    m.add(types.InlineKeyboardButton("🛒 Mua Ngay", callback_data=f"shop_buy|{pid}"))
+    m.add(types.InlineKeyboardButton("🔙 Cửa Hàng", callback_data="shop_home"))
     return m
 
 def sh(ca,tx,mk=None):
@@ -713,17 +715,42 @@ def aT():
             f"🏦 Ví user: {fmt(ba)}đ\n🤖 Bot con {bn}/{bt}\n🌐 Proxy {s['available']}/{s['sold']}\n📱 IPA {ip}</blockquote>")
 def _uF(tg):return gU(tg.id,tg.username or "",tg.first_name or "Khách")
 
-def hSB(b,call,da,uid,u):
-    pid=int(da.split("|",1)[1]);p=sGt(pid)
-    if not p:sh(call,"❌ Không thấy.",bM("shop_home"));return
-    u=_uF(call.from_user)
-    if u["balance"]<p["price"]:
-        kb=types.InlineKeyboardMarkup(row_width=1).add(types.InlineKeyboardButton("💳 Nạp",callback_data="menu_deposit"),types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home"))
-        sh(call,f"⚠️ Thiếu {fmt(p['price']-u['balance'])}đ",kb);return
-    cat=p["category"]
-    if cat=="Account":
-        ok,er,inf=aBuy(uid,pid)
-        if not ok:sh(call,f"❌ {er}",bM("shop_home"));return
+def hSB(b, call, da, uid, u):
+    try:
+        pid = int(da.split("|", 1)[1])
+    except:
+        sh(call, "❌ Lỗi dữ liệu sản phẩm.", bM("shop_home"))
+        return
+        
+    p = sGt(pid)
+    if not p:
+        sh(call, "❌ Không tìm thấy sản phẩm.", bM("shop_home"))
+        return
+    
+    # Lấy thông tin user mới nhất
+    u = _uF(call.from_user)
+    
+    # Kiểm tra số dư
+    if u["balance"] < p["price"]:
+        kb = types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("💳 Nạp tiền", callback_data="menu_deposit"),
+            types.InlineKeyboardButton("🔙 Shop", callback_data="shop_home")
+        )
+        sh(call, f"⚠️ <b>SỐ DƯ KHÔNG ĐỦ</b>\n\n"
+                 f"💵 Giá: <b>{fmt(p['price'])}đ</b>\n"
+                 f"🏦 Số dư: <b>{fmt(u['balance'])}đ</b>\n"
+                 f"❌ Thiếu: <b>{fmt(p['price'] - u['balance'])}đ</b>\n\n"
+                 f"Vui lòng nạp thêm tiền để mua hàng!", kb)
+        return
+
+    cat = p["category"]
+    
+    # Xử lý theo danh mục
+    if cat == "Account":
+        ok, er, inf = aBuy(uid, pid)
+        if not ok:
+            sh(call, f"❌ <b>LỖI:</b> {er}", bM("shop_home"))
+            return
         try:b.delete_message(call.message.chat.id,call.message.message_id)
         except:pass
         tx=(f"<b>🎉 MUA TK OK!</b>\n🏦 Còn: <b>{fmt(u['balance']-inf['price'])}đ</b>\n\n<b>📦 {html.escape(inf['name'])}</b>\n\n<blockquote>"
@@ -734,9 +761,12 @@ def hSB(b,call,da,uid,u):
         try:b.send_message(cAD(),f"💰 Bán TK: <code>{uid}</code> - {fmt(inf['price'])}đ")
         except:pass
         return
-    if cat=="Proxy":
-        ok,er,inf=pBuy(uid,pid)
-        if not ok:sh(call,f"❌ {er}",bM("shop_home"));return
+        
+    if cat == "Proxy":
+        ok, er, inf = pBuy(uid, pid)
+        if not ok:
+            sh(call, f"❌ <b>LỖI:</b> {er}", bM("shop_home"))
+            return
         try:b.delete_message(call.message.chat.id,call.message.message_id)
         except:pass
         ln=(f"{inf['protocol'].lower()}://{inf['username']}:{inf['password']}@{inf['ip']}:{inf['port']}" if inf['username'] else f"{inf['protocol'].lower()}://{inf['ip']}:{inf['port']}")
@@ -749,25 +779,55 @@ def hSB(b,call,da,uid,u):
         try:b.send_message(cAD(),f"💰 Proxy: <code>{uid}</code> - {fmt(inf['price'])}đ")
         except:pass
         return
+
     au=sG("data_api_url");ak=sG("data_api_key");ac=(p.get("api_product_code") or "").strip()
+    
+    # Xử lý Data qua API
     if cat=="Data" and au and ak and ac:
         ok,res=sBuy(uid,pid)
-        if not ok:sh(call,f"❌ {res}",bM("shop_home"));return
+        if not ok:
+            sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
+            return
+            
         me=sG("data_api_method","POST")
         sc,ds,er=cNCC(au,ak,ac,1,f"BOT{res['order_id']}",me)
+        
         if not sc:
+            # Hoàn tiền nếu API lỗi
             aAM(uid,res['price'])
             with db() as c:c.execute("UPDATE orders SET status='refunded' WHERE id=?",(res['order_id'],))
-            sh(call,f"❌ NCC lỗi:\n<code>{html.escape(str(er)[:250])}</code>\n\n💸 Đã hoàn {fmt(res['price'])}đ",bM("shop_home"));return
-        msg=(f"<b>🎉 MUA DATA OK!</b>\n\n<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n<b>📄 Data:</b>\n<code>{html.escape(str(ds)[:3000])}</code>")
-        sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(types.InlineKeyboardButton("🛍 Đơn",callback_data="shop_myorders"),types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")))
+            sh(call,f"❌ <b>LỖI NHÀ CUNG CẤP:</b>\n<code>{html.escape(str(er)[:250])}</code>\n\n"
+                     f"💸 Đã hoàn lại <b>{fmt(res['price'])}đ</b> vào số dư của bạn.", bM("shop_home"))
+            return
+            
+        msg=(f"<b>🎉 MUA DATA THÀNH CÔNG!</b>\n\n"
+             f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
+             f"<b>📄 Thông tin Data:</b>\n<code>{html.escape(str(ds)[:3000])}</code>")
+             
+        sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
+            types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
+            types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
+        ))
+        
         with db() as c:c.execute("UPDATE orders SET status='delivered' WHERE id=?",(res['order_id'],))
         return
+
+    # Mua hàng thông thường (không qua API)
     ok,res=sBuy(uid,pid)
-    if not ok:sh(call,f"❌ {res}",bM("shop_home"));return
-    msg=(f"<b>🎉 ĐẶT HÀNG OK!</b>\n\n<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n⚠️ Chờ admin.")
-    sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(types.InlineKeyboardButton("🛍 Đơn",callback_data="shop_myorders"),types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")))
-    try:b.send_message(cAD(),f"🔔 ĐƠN #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
+    if not ok:
+        sh(call, f"❌ <b>LỖI:</b> {res}", bM("shop_home"))
+        return
+        
+    msg=(f"<b>🎉 ĐẶT HÀNG THÀNH CÔNG!</b>\n\n"
+         f"<blockquote>#{res['order_id']}\n{html.escape(res['name'])}\n💵 {fmt(res['price'])}đ\n🏦 Còn: {fmt(u['balance']-res['price'])}đ</blockquote>\n\n"
+         f"⚠️ Vui lòng chờ admin xử lý đơn hàng.")
+         
+    sh(call,msg,types.InlineKeyboardMarkup(row_width=1).add(
+        types.InlineKeyboardButton("🛍 Đơn hàng",callback_data="shop_myorders"),
+        types.InlineKeyboardButton("🔙 Shop",callback_data="shop_home")
+    ))
+    
+    try:b.send_message(cAD(),f"🔔 ĐƠN HÀNG MỚI #{res['order_id']}\n<code>{uid}</code> - {html.escape(res['name'])} - {fmt(res['price'])}đ")
     except:pass
 
 def regH(bot):
@@ -793,8 +853,6 @@ def regH(bot):
     def cs(m):
         US.pop(m.from_user.id,None)
         u=_uF(m.from_user)
-        
-        # [ĐÃ XÓA welcome_msg - Không gửi tin nhắn chào nữa]
         
         # Gửi VIDEO/GIF tự động phát (không có caption)
         vi=sG("welcome_video","")
@@ -969,7 +1027,7 @@ def regH(bot):
             n=f[0];pr=int(re.sub(r"[^\d]","",f[1]));cat=f[2] if len(f)>2 else "Data";de=f[3] if len(f)>3 else ""
         except:bot.reply_to(m,"❌ Dữ liệu sai");return
         if not n or pr<=0:bot.reply_to(m,"❌ Tên/giá sai");return
-        with db() as c:pid=c.execute("INSERT INTO products (name,description,price,category) VALUES (?,?,?,?)",(n,de,pr,cat)).lastrowid
+        with db() as c:pid=c.execute("INSERT INTO products (name,description,price,category,stock) VALUES (?,?,?,?,-1)",(n,de,pr,cat)).lastrowid
         US.pop(m.from_user.id,None);bot.reply_to(m,f"✅ SP #{pid}: {html.escape(n)}")
 
     @bot.message_handler(func=lambda m:m.from_user and m.from_user.id==cAD() and (US.get(m.from_user.id) or "").startswith("ADMIN_EDIT_SETTING|") and m.text and not m.text.startswith("/"))
