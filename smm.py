@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Module Buff Mạng Xã Hội — Auto-detect giá chính xác cho subre247"""
+"""Module Buff Mạng Xã Hội — Full chức năng (Tìm kiếm + Tên gọn)"""
 import os, re, time, html, json, sqlite3, logging, threading
 from datetime import datetime
 import requests
@@ -221,23 +221,14 @@ def svc_in_subtype(bp, platform, subtype):
 
 # ═══════════ CORE: PHÂN TÍCH GIÁ ═══════════
 def _parse_api_rate(raw_rate_val, usd_rate, currency_mode="auto", multiplier=1.0):
-    """
-    Phân tích giá API thông minh cho subre247:
-    - "13.850" (có dấu chấm ngăn nghìn) → 13,850 VNĐ
-    - "131.06" (số thập phân, <1000) → 131,060 VNĐ (đơn vị "nghìn đồng")
-    - "13850"  (số nguyên >=1000) → 13,850 VNĐ
-    - "0.53"   (số thập phân, <1) → USD, nhân tỷ giá
-    """
     raw = str(raw_rate_val or "0").strip()
     raw = re.sub(r"[^\d.,]", "", raw)
 
-    is_vnd_format = False  # True nếu là format VNĐ có dấu phân cách nghìn
+    is_vnd_format = False
     if "." in raw:
-        # "13.850" hoặc "1.234.567" → thousand separator
         if re.match(r"^\d{1,3}(\.\d{3})+$", raw):
             raw = raw.replace(".", ""); is_vnd_format = True
     if "," in raw and not is_vnd_format:
-        # "13,850" → thousand separator (kiểu Mỹ)
         if re.match(r"^\d{1,3}(,\d{3})+$", raw):
             raw = raw.replace(",", ""); is_vnd_format = True
 
@@ -251,20 +242,14 @@ def _parse_api_rate(raw_rate_val, usd_rate, currency_mode="auto", multiplier=1.0
         vnd_price = api_rate * mult
     elif mode == "usd":
         vnd_price = api_rate * usd_rate * mult
-    elif mode == "nghin":  # nghìn đồng
+    elif mode == "nghin":
         vnd_price = api_rate * 1000 * mult
-    else:  # auto - TỰ ĐỘNG NHẬN DIỆN
-        if is_vnd_format:
-            # Có dấu phân cách nghìn → đã là VNĐ
-            vnd_price = api_rate * mult
-        elif api_rate >= 1000:
-            # Số nguyên lớn → VNĐ
+    else:  # auto
+        if is_vnd_format or api_rate >= 1000:
             vnd_price = api_rate * mult
         elif api_rate >= 1:
-            # Số thập phân 1..999 → "nghìn đồng", nhân 1000
             vnd_price = api_rate * 1000 * mult
         else:
-            # < 1 → USD
             vnd_price = api_rate * usd_rate * mult
 
     return int(round(vnd_price)), api_rate
@@ -286,6 +271,22 @@ def _parse_service(s, rate, markup, currency_mode="auto", multiplier=1.0):
     try: mx = int(float(str(s.get("max") or 100000).strip()))
     except: mx = 100000
     return nm, cat, cost, price, mn, mx, api_rate
+
+def _format_svc_name(raw_name, api_id=""):
+    """Rút gọn tên dịch vụ để hiển thị trên nút"""
+    nm = str(raw_name or "")
+    # Bỏ "Server #ID - " hoặc "Server #ID | "
+    nm = re.sub(r"^Server\s*#\d+\s*[-|]\s*", "", nm, flags=re.IGNORECASE)
+    # Bỏ tên Platform ở đầu (TikTok, Facebook, ...)
+    for p, _ in PLATFORMS:
+        nm = re.sub(rf"^{p}\s*[-|]?\s*", "", nm, flags=re.IGNORECASE)
+    nm = nm.strip()
+    if len(nm) > 25: nm = nm[:24] + "…"
+    
+    # Trích xuất ID Server
+    m = re.search(r"Server\s*#(\d+)", str(raw_name), re.IGNORECASE)
+    id_str = f"[{m.group(1)}] " if m else (f"[{api_id}] " if api_id else "")
+    return f"{id_str}{nm}"
 
 def _detect_platform(t):
     t = t.lower()
@@ -344,6 +345,9 @@ def register(bot, h):
     show = h["show"]; back_markup = h["back_markup"]; user_states = h["user_states"]
     dbp = h["db_path_fn"]
     admin_cb = h.get("admin_cb") or (lambda: "adm_panel")
+
+    # Lưu trữ tạm kết quả tìm kiếm
+    _temp_search = {}
 
     def _safe(fn):
         def w(call):
@@ -409,8 +413,8 @@ def register(bot, h):
         chunk = svcs[page*per:(page+1)*per]
         m = types.InlineKeyboardMarkup(row_width=1)
         for s in chunk:
-            nm = s[2] if len(s[2]) <= 32 else s[2][:31] + "…"
-            m.add(types.InlineKeyboardButton(f"{fmt(s[5])}đ/1k · {nm}",
+            disp_name = _format_svc_name(s[2], s[3])
+            m.add(types.InlineKeyboardButton(f"{fmt(s[5])}đ/1k · {disp_name}",
                   callback_data=f"smm_view|{s[0]}"))
         nav = []
         if page > 0:
@@ -601,6 +605,7 @@ def register(bot, h):
                  f"📥 Cache: <b>{ccount}</b> DV · {ctime}</blockquote>")
         m = types.InlineKeyboardMarkup(row_width=1)
         m.add(types.InlineKeyboardButton("📥 Chọn DV để bán", callback_data="adm_pick_menu"),
+              types.InlineKeyboardButton("🔍 Tìm kiếm dịch vụ", callback_data="adm_pick_search"),
               types.InlineKeyboardButton("🔄 Tải DS từ API", callback_data="adm_smm_fetch"),
               types.InlineKeyboardButton("📦 DV đang bán", callback_data="adm_smm_list"),
               types.InlineKeyboardButton("💰 Giá & Lãi", callback_data="adm_smm_price"),
@@ -655,8 +660,9 @@ def register(bot, h):
             if pl in groups:
                 m.add(types.InlineKeyboardButton(f"{icon} {pl} ({groups[pl]})",
                       callback_data=f"adm_pick_plat|{pl}"))
-        m.add(types.InlineKeyboardButton("🔄 Tải lại từ API", callback_data="adm_smm_fetch"))
-        m.add(types.InlineKeyboardButton("🔙 Admin SMM", callback_data="adm_smm"))
+        m.add(types.InlineKeyboardButton("🔍 Tìm kiếm dịch vụ", callback_data="adm_pick_search"),
+              types.InlineKeyboardButton("🔄 Tải lại từ API", callback_data="adm_smm_fetch"),
+              types.InlineKeyboardButton("🔙 Admin SMM", callback_data="adm_smm"))
         show(call, f"<b>📥 CHỌN DV TỪ API</b>\n\n"
                    + (f"<blockquote>{note}</blockquote>\n\n" if note else "")
                    + f"<blockquote>📊 Cache: <b>{len(services)}</b> DV\n🕐 {t}\n"
@@ -669,6 +675,121 @@ def register(bot, h):
         if call.from_user.id != cur_admin(): return
         _pick_menu(call)
 
+    # ═══════════ SEARCH ═══════════
+    @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_pick_search")
+    @_safe
+    def _pick_search(call):
+        if call.from_user.id != cur_admin(): return
+        user_states[call.from_user.id] = "SMM_ADMIN_SEARCH"
+        show(call, "<b>🔍 TÌM KIẾM DỊCH VỤ</b>\n\nNhập từ khóa tìm kiếm "
+                   "(VD: <code>1844</code>, <code>TikTok Like VN</code>, <code>Facebook Follow</code>).\n"
+                   "Bot sẽ tìm trong tên, ID, nền tảng và loại dịch vụ.\n\n/cancel hủy.",
+             back_markup("adm_pick_menu"))
+
+    @bot.message_handler(func=lambda m: m.from_user and m.from_user.id == cur_admin() and
+        user_states.get(m.from_user.id) == "SMM_ADMIN_SEARCH" and m.text and not m.text.startswith("/"))
+    def _search_in(m):
+        keyword = m.text.strip().lower()
+        user_states.pop(m.from_user.id, None)
+        bp = dbp()
+        services, _ = cache_load(bp)
+        if not services:
+            bot.reply_to(m, "⚠️ Cache trống. Vui lòng Tải DS từ API trước."); return
+        
+        matched = []
+        for s in services:
+            if not isinstance(s, dict): continue
+            text = f"{s.get('name','')} {s.get('service','')} {s.get('category','')} {s.get('platform','')}".lower()
+            if keyword in text:
+                matched.append(s)
+        
+        if not matched:
+            bot.reply_to(m, f"❌ Không tìm thấy dịch vụ nào khớp với '<code>{html.escape(keyword)}</code>'.", parse_mode="HTML")
+            return
+        
+        # Lưu kết quả tìm kiếm tạm thời
+        _temp_search[m.from_user.id] = matched
+        _show_search_results(m.chat.id, m.from_user.id, matched, 0, is_msg=True)
+
+    def _show_search_results(chat_id, user_id, matched, page, is_msg=False):
+        bp = dbp(); rate = _get_rate(bp); curr = _get_currency(bp); mult = _get_mult(bp)
+        per = 8; tp = max(1, (len(matched)+per-1)//per); page = max(0, min(page, tp-1))
+        chunk = matched[page*per:(page+1)*per]
+        
+        m = types.InlineKeyboardMarkup(row_width=1)
+        for s in chunk:
+            api_id = str(s.get("service") or s.get("id") or "").strip()
+            nm = str(s.get("name") or "")
+            cost_vnd, _ = _parse_api_rate(s.get("rate"), rate, curr, mult)
+            icon = "✅" if svc_exists(bp, api_id) else "➕"
+            disp_name = _format_svc_name(nm, api_id)
+            m.add(types.InlineKeyboardButton(f"{icon} {fmt(cost_vnd)}đ · {disp_name}",
+                  callback_data=f"adm_pick_do_search|{api_id}|{page}"))
+        
+        nav = []
+        if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_search_res|{page-1}"))
+        nav.append(types.InlineKeyboardButton(f"{page+1}/{tp}", callback_data="noop"))
+        if page < tp-1: nav.append(types.InlineKeyboardButton("➡️", callback_data=f"adm_search_res|{page+1}"))
+        if nav: m.row(*nav)
+        
+        m.add(types.InlineKeyboardButton("🔍 Tìm lại", callback_data="adm_pick_search"),
+              types.InlineKeyboardButton("🔙 Chọn nền tảng", callback_data="adm_pick_menu"))
+        
+        txt = (f"<b>🔍 KẾT QUẢ TÌM KIẾM</b>\n\n"
+               f"<blockquote>📊 Tìm thấy: <b>{len(matched)}</b> DV\n"
+               f"📄 Trang {page+1}/{tp}\n"
+               f"💡 Bấm để thêm DV</blockquote>")
+        
+        if is_msg:
+            bot.send_message(chat_id, txt, reply_markup=m, parse_mode="HTML")
+        else:
+            try:
+                bot.edit_message_text(txt, chat_id, 
+                    _temp_search.get(f"{user_id}_msg_id"), reply_markup=m, parse_mode="HTML")
+            except:
+                bot.send_message(chat_id, txt, reply_markup=m, parse_mode="HTML")
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_search_res|"))
+    @_safe
+    def _search_res(call):
+        if call.from_user.id != cur_admin(): return
+        page = int(call.data.split("|")[1])
+        matched = _temp_search.get(call.from_user.id, [])
+        if not matched:
+            show(call, "⚠️ Phiên tìm kiếm đã hết hạn. Vui lòng tìm lại.", back_markup("adm_pick_menu")); return
+        _temp_search[f"{call.from_user.id}_msg_id"] = call.message.message_id
+        _show_search_results(call.message.chat.id, call.from_user.id, matched, page)
+
+    @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_pick_do_search|"))
+    @_safe
+    def _pick_do_search(call):
+        if call.from_user.id != cur_admin(): return
+        parts = call.data.split("|")
+        api_id = parts[1]; page = int(parts[2]) if len(parts) > 2 else 0
+        bp = dbp()
+        services, _ = cache_load(bp)
+        found = None
+        for s in services:
+            if not isinstance(s, dict): continue
+            sid = str(s.get("service") or s.get("id") or "").strip()
+            if sid == api_id: found = s; break
+        if not found:
+            bot.send_message(call.message.chat.id, "❌ Không tìm thấy DV trong cache."); return
+        if not svc_exists(bp, api_id):
+            rate = _get_rate(bp); markup = _get_markup(bp)
+            nm, cat, cost, price, mn, mx, _ = _parse_service(found, rate, markup, _get_currency(bp), _get_mult(bp))
+            pl = _norm_cache_platform(found)
+            svc_add(bp, pl, nm, api_id, cost, price, mn, mx)
+            bot.answer_callback_query(call.id, f"✅ Đã thêm DV #{api_id}")
+        else:
+            bot.answer_callback_query(call.id, "ℹ️ DV này đã có trong danh sách bán")
+        
+        # Load lại kết quả tìm kiếm hiện tại
+        matched = _temp_search.get(call.from_user.id, [])
+        _temp_search[f"{call.from_user.id}_msg_id"] = call.message.message_id
+        _show_search_results(call.message.chat.id, call.from_user.id, matched, page)
+
+    # ═══════════ PICKER CŨ ═══════════
     @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("adm_pick_plat|"))
     @_safe
     def _pick_plat(call):
@@ -688,6 +809,7 @@ def register(bot, h):
             if label in subs:
                 m.add(types.InlineKeyboardButton(f"{icon} {label} ({subs[label]})",
                       callback_data=f"adm_pick_sub|{pl}|{label}"))
+        m.add(types.InlineKeyboardButton("🔍 Tìm kiếm dịch vụ", callback_data="adm_pick_search"))
         m.add(types.InlineKeyboardButton("🔙 Chọn nền tảng", callback_data="adm_pick_menu"))
         show(call, f"<b>📥 {pl}</b>\n\n👇 Chọn loại:", m)
 
@@ -716,10 +838,11 @@ def register(bot, h):
         m = types.InlineKeyboardMarkup(row_width=1)
         for s in chunk:
             api_id = str(s.get("service") or s.get("id") or "").strip()
-            nm = str(s.get("name") or "")[:30]
+            nm = str(s.get("name") or "")
             cost_vnd, _ = _parse_api_rate(s.get("rate"), rate, curr, mult)
             icon = "✅" if svc_exists(bp, api_id) else "➕"
-            m.add(types.InlineKeyboardButton(f"{icon} {fmt(cost_vnd)}đ · {nm}",
+            disp_name = _format_svc_name(nm, api_id)
+            m.add(types.InlineKeyboardButton(f"{icon} {fmt(cost_vnd)}đ · {disp_name}",
                   callback_data=f"adm_pick_do|{api_id}|{pl}|{sub}|{page}"))
         nav = []
         if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_pick_sub|{pl}|{sub}|{page-1}"))
@@ -728,6 +851,7 @@ def register(bot, h):
         if nav: m.row(*nav)
         m.add(types.InlineKeyboardButton("➕ Thêm TẤT CẢ loại này",
               callback_data=f"adm_pick_all|{pl}|{sub}"))
+        m.add(types.InlineKeyboardButton("🔍 Tìm kiếm dịch vụ", callback_data="adm_pick_search"))
         m.add(types.InlineKeyboardButton("🔙", callback_data=f"adm_pick_plat|{pl}"))
         show(call, f"<b>📥 {pl} · {sub}</b>\n\n"
                    f"<blockquote>📊 {len(matched)} DV · Trang {page+1}/{tp}\n"
@@ -800,12 +924,10 @@ def register(bot, h):
             if not found: skipped += 1; continue
             try:
                 nm, cat, cost, price, mn, mx, _ = _parse_service(found, rate, markup, curr, mult)
-                # Xóa custom_price để tính lại toàn bộ
                 svc_update(bp, sid, "custom_price", 0)
                 svc_update(bp, sid, "cost", cost)
                 svc_update(bp, sid, "price", price)
-                updated += 1
-                unlocked += 1
+                updated += 1; unlocked += 1
             except Exception as e:
                 log.warning("recalc %s: %s", sid, e); skipped += 1
         _adm_menu(call, f"✅ Đã tính lại giá cho <b>{updated}</b> DV\n"
@@ -875,8 +997,7 @@ def register(bot, h):
                    "<b>💡 Với subre247:</b>\n"
                    "• Tiền tệ: <b>🔄 Tự động</b> (khuyên dùng)\n"
                    "• Hệ số nhân: <b>1</b>\n"
-                   "• Lãi: tuỳ bạn\n\n"
-                   "Bot tự nhận diện: 131.06 → 131,060đ, 13.850 → 13,850đ.", m)
+                   "• Lãi: tuỳ bạn", m)
 
     @bot.callback_query_handler(func=lambda c: (c.data or "") == "adm_smm_curr")
     @_safe
@@ -912,8 +1033,7 @@ def register(bot, h):
         if k not in ("smm_api_url", "smm_api_key", "smm_usd_rate", "smm_markup_pct", "smm_rate_multiplier"): return
         user_states[call.from_user.id] = f"SMM_CFG|{k}"
         hints = {"smm_api_url":"https://subre247.com/api/v2","smm_api_key":"API Key",
-                 "smm_usd_rate":"26000","smm_markup_pct":"30",
-                 "smm_rate_multiplier":"1 (mặc định)"}
+                 "smm_usd_rate":"26000","smm_markup_pct":"30","smm_rate_multiplier":"1 (mặc định)"}
         show(call, f"Nhập giá trị mới cho <code>{k}</code>.\n<i>{hints.get(k,'')}</i>\n/cancel hủy.",
              back_markup("adm_smm_price" if k in ("smm_usd_rate","smm_markup_pct","smm_rate_multiplier") else "adm_smm_cfg"))
 
@@ -973,8 +1093,8 @@ def register(bot, h):
         for s in chunk:
             icon = "✅" if s[8] else "⛔"
             lock = "🔒" if int(s[9] or 0) > 0 else ""
-            nm = s[2] if len(s[2]) <= 26 else s[2][:25] + "…"
-            m.add(types.InlineKeyboardButton(f"{icon}{lock} #{s[0]} {s[1]} | {nm} – {fmt(s[5])}đ",
+            disp_name = _format_svc_name(s[2], s[3])
+            m.add(types.InlineKeyboardButton(f"{icon}{lock} #{s[0]} | {disp_name} – {fmt(s[5])}đ",
                   callback_data=f"adm_smm_sv|{s[0]}"))
         nav = []
         if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_smm_pg|{page-1}"))
