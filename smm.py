@@ -216,19 +216,36 @@ def svc_in_subtype(bp, platform, subtype):
 
 
 # ═══════════ HELPERS ═══════════
+def _parse_api_rate(raw_rate_val, usd_rate):
+    """Hàm xử lý chuỗi giá từ API, loại bỏ dấu phân cách hàng nghìn"""
+    raw = str(raw_rate_val or "0").strip()
+    # Loại bỏ mọi ký tự không phải số, dấu chấm, dấu phẩy
+    raw = re.sub(r"[^\d.,]", "", raw)
+    
+    is_vnd = False
+    if "." in raw:
+        # Nếu có dấu chấm và theo sau là đúng 3 số (VD: 13.850) -> Định dạng VNĐ
+        if re.match(r"^\d+\.\d{3}$", raw) or raw.count(".") > 1:
+            raw = raw.replace(".", "")
+            is_vnd = True
+    elif "," in raw:
+        # Nếu có dấu phẩy (VD: 13,850) -> Định dạng VNĐ
+        raw = raw.replace(",", "")
+        is_vnd = True
+        
+    try: api_rate = float(raw)
+    except: api_rate = 0
+    
+    if is_vnd or api_rate >= 1000:
+        return int(round(api_rate)), api_rate # Trả về (Giá VNĐ, Giá gốc)
+    else:
+        return int(round(api_rate * usd_rate)), api_rate # Trả về (Giá VNĐ quy đổi từ USD, Giá gốc)
+
 def _parse_service(s, rate, markup):
     nm = str(s.get("name") or "Dịch vụ")[:80]
     cat = str(s.get("category") or s.get("type") or "Khác")[:30]
-    try: api_rate = float(s.get("rate") or 0)
-    except: api_rate = 0
     
-    # TỰ ĐỘNG NHẬN DIỆN TIỀN TỆ:
-    # Nếu giá API < 1000 (VD: 0.53) -> Là USD -> Nhân tỷ giá
-    # Nếu giá API >= 1000 (VD: 13850) -> Là VNĐ -> Giữ nguyên
-    if 0 < api_rate < 1000:
-        cost = int(round(api_rate * rate)) # Là USD
-    else:
-        cost = int(round(api_rate)) # Là VNĐ
+    cost, api_rate = _parse_api_rate(s.get("rate"), rate)
         
     price = int(round(cost * (1 + markup / 100.0)))
     if price <= 0: price = 1000
@@ -237,10 +254,6 @@ def _parse_service(s, rate, markup):
     try: mx = int(float(str(s.get("max") or 100000).strip()))
     except: mx = 100000
     return nm, cat, cost, price, mn, mx, api_rate
-
-def _svc_rate(s):
-    try: return float(s.get("rate") or 0)
-    except: return 0
 
 def _detect_platform(t):
     t = t.lower()
@@ -663,7 +676,7 @@ def register(bot, h):
             if _norm_cache_platform(s) != pl: continue
             if detect_subtype(str(s.get("name") or "")) != sub: continue
             matched.append(s)
-        matched.sort(key=_svc_rate)
+        matched.sort(key=lambda x: x.get("rate", 0))
         per = 8
         tp = max(1, (len(matched)+per-1)//per)
         page = max(0, min(page, tp-1))
@@ -675,14 +688,10 @@ def register(bot, h):
             nm = str(s.get("name") or "")[:30]
             
             # FIX: Hiển thị giá chính xác trong menu chọn của admin
-            api_rate = _svc_rate(s)
-            if 0 < api_rate < 1000:
-                rate_vnd = int(api_rate * rate)
-            else:
-                rate_vnd = int(api_rate)
+            cost_vnd, _ = _parse_api_rate(s.get("rate"), rate)
                 
             icon = "✅" if svc_exists(bp, api_id) else "➕"
-            m.add(types.InlineKeyboardButton(f"{icon} {fmt(rate_vnd)}đ · {nm}",
+            m.add(types.InlineKeyboardButton(f"{icon} {fmt(cost_vnd)}đ · {nm}",
                   callback_data=f"adm_pick_do|{api_id}|{pl}|{sub}|{page}"))
         nav = []
         if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"adm_pick_sub|{pl}|{sub}|{page-1}"))
