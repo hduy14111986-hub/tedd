@@ -716,6 +716,17 @@ def aT():
 def _uF(tg):return gU(tg.id,tg.username or "",tg.first_name or "Khách")
 
 def hSB(b, call, da, uid, u):
+    def hSB(b, call, da, uid, u):
+    # THÊM 2 DÒNG NÀY ĐỂ DEBUG
+    try: b.answer_callback_query(call.id, "Đã nhận nút Mua!", show_alert=True)
+    except: pass
+    
+    try:
+        pid = int(da.split("|", 1)[1])
+    except:
+        sh(call, "❌ Lỗi dữ liệu sản phẩm.", bM("shop_home"))
+        return
+    # ... phần còn lại giữ nguyên
     try:
         pid = int(da.split("|", 1)[1])
     except:
