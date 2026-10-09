@@ -888,12 +888,15 @@ def regH(bot):
             except:pass
             return
         uid=call.from_user.id;u=_uF(call.from_user);ia=uid==cAD()
-        try:bot.answer_callback_query(call.id)
-        except:pass
+        try:
+            bot.answer_callback_query(call.id, "Đã nhận nút bấm!", show_alert=True) # TẠM THỜI HIỆN POPUP ĐỂ TEST
+        except Exception as e:
+            log.error("Lỗi answer_callback_query: %s", e)
+
         try:dsp(bot,call,da,uid,u,ia)
         except Exception as e:
             log.exception("cr [%s]: %s",da,e)
-            try:bot.answer_callback_query(call.id,f"❌ {str(e)[:80]}",show_alert=True)
+            try:bot.answer_callback_query(call.id,f"❌ Lỗi hệ thống: {str(e)[:80]}",show_alert=True)
             except:pass
 
     @bot.message_handler(func=lambda m:m.from_user and US.get(m.from_user.id)=="WAITING_BOT_TOKEN" and m.text and not m.text.startswith("/"))
