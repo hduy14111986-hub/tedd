@@ -219,16 +219,24 @@ def svc_in_subtype(bp, platform, subtype):
 def _parse_service(s, rate, markup):
     nm = str(s.get("name") or "Dịch vụ")[:80]
     cat = str(s.get("category") or s.get("type") or "Khác")[:30]
-    try: rate_usd = float(s.get("rate") or 0)
-    except: rate_usd = 0
-    cost = int(round(rate_usd * rate))
+    try: api_rate = float(s.get("rate") or 0)
+    except: api_rate = 0
+    
+    # TỰ ĐỘNG NHẬN DIỆN TIỀN TỆ:
+    # Nếu giá API < 1000 (VD: 0.53) -> Là USD -> Nhân tỷ giá
+    # Nếu giá API >= 1000 (VD: 13850) -> Là VNĐ -> Giữ nguyên
+    if 0 < api_rate < 1000:
+        cost = int(round(api_rate * rate)) # Là USD
+    else:
+        cost = int(round(api_rate)) # Là VNĐ
+        
     price = int(round(cost * (1 + markup / 100.0)))
     if price <= 0: price = 1000
     try: mn = int(float(str(s.get("min") or 100).strip()))
     except: mn = 100
     try: mx = int(float(str(s.get("max") or 100000).strip()))
     except: mx = 100000
-    return nm, cat, cost, price, mn, mx, rate_usd
+    return nm, cat, cost, price, mn, mx, api_rate
 
 def _svc_rate(s):
     try: return float(s.get("rate") or 0)
@@ -665,7 +673,14 @@ def register(bot, h):
         for s in chunk:
             api_id = str(s.get("service") or s.get("id") or "").strip()
             nm = str(s.get("name") or "")[:30]
-            rate_vnd = int(_svc_rate(s) * rate)
+            
+            # FIX: Hiển thị giá chính xác trong menu chọn của admin
+            api_rate = _svc_rate(s)
+            if 0 < api_rate < 1000:
+                rate_vnd = int(api_rate * rate)
+            else:
+                rate_vnd = int(api_rate)
+                
             icon = "✅" if svc_exists(bp, api_id) else "➕"
             m.add(types.InlineKeyboardButton(f"{icon} {fmt(rate_vnd)}đ · {nm}",
                   callback_data=f"adm_pick_do|{api_id}|{pl}|{sub}|{page}"))
